@@ -21,7 +21,7 @@ cargo run
 3. Open the game at:
 
 ```
-http://localhost:3001
+http://localhost:3000
 ```
 
 ## Controls
@@ -40,6 +40,10 @@ http://localhost:3001
 - Monsters with simple real-time combat.
 - NPCs with data-driven quests and rewards.
 - Multiplayer positioning and chat (no PvP).
+
+## Protocol
+
+See `docs/protocol.md` for the HTTP/WebSocket message schema.
 
 ## Data-driven content
 
