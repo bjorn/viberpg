@@ -20,14 +20,15 @@
   let playerState = null;
   let worldSeed = 0;
 
-  const app = new PIXI.Application({
+  const app = new PIXI.Application();
+  await app.init({
     resizeTo: window,
     backgroundColor: 0x0b0e14,
     antialias: false,
   });
-  PIXI.settings.SCALE_MODE = PIXI.SCALE_MODES.NEAREST;
+  PIXI.TextureStyle.defaultOptions.scaleMode = PIXI.SCALE_MODES.NEAREST;
   app.renderer.roundPixels = true;
-  document.body.appendChild(app.view);
+  document.body.appendChild(app.canvas);
 
   const world = new PIXI.Container();
   const tileLayer = new PIXI.Container();
@@ -489,19 +490,20 @@
     const ctx = atlasCanvas.getContext('2d');
     tileAssetUrls.forEach((url, index) => {
       const texture = PIXI.Texture.from(url);
-      const source = texture.baseTexture?.resource?.source;
+      const source = texture.source?.resource?.source || texture.baseTexture?.resource?.source;
       if (source) {
         ctx.drawImage(source, index * tileSize, 0, tileSize, tileSize);
       }
     });
-    const baseTexture = PIXI.BaseTexture.from(atlasCanvas);
+    const atlasTexture = PIXI.Texture.from(atlasCanvas);
     const tiles = {};
     tileAssetUrls.forEach((_, index) => {
-      tiles[index] = new PIXI.Texture(
-        baseTexture,
-        new PIXI.Rectangle(index * tileSize, 0, tileSize, tileSize),
-      );
+      tiles[index] = new PIXI.Texture({
+        source: atlasTexture.source,
+        frame: new PIXI.Rectangle(index * tileSize, 0, tileSize, tileSize),
+      });
     });
+    tiles.atlas = atlasTexture;
     return tiles;
   }
 
