@@ -30,6 +30,7 @@ const GATHER_RANGE: f32 = 1.1;
 const INTERACT_RANGE: f32 = 1.2;
 const SAVE_INTERVAL_MS: i64 = 5_000;
 const MAX_HP: i32 = 10;
+const PLAYER_REGEN_INTERVAL_MS: i64 = 5_000;
 const TYPING_TIMEOUT_MS: i64 = 2500;
 const CHUNK_KEEP_RADIUS: i32 = 3;
 const CHUNK_TTL_MS: i64 = 60_000;
@@ -440,6 +441,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                     &app_state.noise,
                     &app_state.data,
                 );
+                apply_player_regen(&mut player, now_ms);
                 state.players.insert(id, player);
             }
         }
@@ -530,6 +532,18 @@ fn update_player_movement(
     }
     if can_walk(world, noise, player.x, next_y) {
         player.y = next_y;
+    }
+}
+
+fn apply_player_regen(player: &mut Player, now_ms: i64) {
+    if player.hp >= MAX_HP {
+        player.last_regen_ms = now_ms;
+        return;
+    }
+
+    if now_ms - player.last_regen_ms >= PLAYER_REGEN_INTERVAL_MS {
+        player.hp = (player.hp + 1).min(MAX_HP);
+        player.last_regen_ms = now_ms;
     }
 }
 
@@ -1506,6 +1520,7 @@ struct Player {
     last_attack_ms: i64,
     last_gather_ms: i64,
     last_interact_ms: i64,
+    last_regen_ms: i64,
     last_saved_ms: i64,
 }
 
@@ -1524,6 +1539,7 @@ impl Player {
             last_attack_ms: 0,
             last_gather_ms: 0,
             last_interact_ms: 0,
+            last_regen_ms: now_millis(),
             last_saved_ms: now_millis(),
         }
     }
