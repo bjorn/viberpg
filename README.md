@@ -4,7 +4,12 @@ A small, data-driven online RPG with a Rust backend, MongoDB persistence, and a 
 
 ## Quick start
 
-1. Start MongoDB locally (or set a remote URI).
+1. Start MongoDB (or set a remote URI). For local dev:
+
+```bash
+docker compose up
+```
+
 2. Run the server:
 
 ```bash
