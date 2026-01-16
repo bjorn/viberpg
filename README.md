@@ -20,7 +20,7 @@ cargo run
 3. Open the game at:
 
 ```
-http://localhost:3000
+http://localhost:3001
 ```
 
 ## Controls

@@ -37,8 +37,8 @@
 
   const chunkTiles = new Map();
   const resourceSprites = new Map();
-  const playerSprites = new Map();
-  const monsterSprites = new Map();
+  const playerEntities = new Map();
+  const monsterEntities = new Map();
   const projectileSprites = new Map();
   const npcSprites = new Map();
 
@@ -46,14 +46,21 @@
   const pendingChunks = new Set();
 
   const keys = new Set();
+  const INTERP_MS = 120;
+  const MAX_CHAT_LINES = 60;
+  let lastStatusUpdate = 0;
 
   function addChat(text, className) {
     const line = document.createElement('div');
     line.className = `line ${className || ''}`.trim();
     line.textContent = text;
+    const shouldStick = chatLog.scrollTop + chatLog.clientHeight >= chatLog.scrollHeight - 8;
     chatLog.appendChild(line);
-    while (chatLog.children.length > 10) {
+    while (chatLog.children.length > MAX_CHAT_LINES) {
       chatLog.removeChild(chatLog.firstChild);
+    }
+    if (shouldStick) {
+      chatLog.scrollTop = chatLog.scrollHeight;
     }
   }
 
@@ -74,9 +81,13 @@
   }
 
   function requestChunksAround() {
-    if (!playerState || !wsOpen) return;
-    const cx = Math.floor(playerState.x / chunkSize);
-    const cy = Math.floor(playerState.y / chunkSize);
+    if (!wsOpen) return;
+    const playerEntity = playerEntities.get(playerId);
+    const px = playerEntity ? playerEntity.x : playerState?.x;
+    const py = playerEntity ? playerEntity.y : playerState?.y;
+    if (px == null || py == null) return;
+    const cx = Math.floor(px / chunkSize);
+    const cy = Math.floor(py / chunkSize);
     const needed = [];
     for (let dx = -2; dx <= 2; dx += 1) {
       for (let dy = -2; dy <= 2; dy += 1) {
@@ -148,59 +159,57 @@
   }
 
   function syncPlayers(players) {
+    const now = performance.now();
     const seen = new Set();
     players.forEach((player) => {
       seen.add(player.id);
-      if (!playerSprites.has(player.id)) {
+      let entity = playerEntities.get(player.id);
+      if (!entity) {
         const texture = player.id === playerId ? textures.player : textures.playerAlt;
         const sprite = new PIXI.Sprite(texture);
         sprite.anchor.set(0.5, 0.9);
         entityLayer.addChild(sprite);
-        playerSprites.set(player.id, sprite);
+        entity = createEntityState(sprite, player.x, player.y, now);
+        playerEntities.set(player.id, entity);
+      } else {
+        updateEntityTarget(entity, player.x, player.y, now);
       }
-      const sprite = playerSprites.get(player.id);
-      sprite.x = (player.x + 0.5) * tileSize;
-      sprite.y = (player.y + 0.9) * tileSize;
+      entity.hp = player.hp;
       if (player.id === playerId) {
         playerState = player;
-        statusEl.textContent = `HP ${player.hp} | ${player.x.toFixed(1)}, ${player.y.toFixed(1)}`;
       }
     });
 
-    for (const [id, sprite] of playerSprites.entries()) {
+    for (const [id, entity] of playerEntities.entries()) {
       if (!seen.has(id)) {
-        if (sprite.parent) {
-          sprite.parent.removeChild(sprite);
-        }
-        sprite.destroy();
-        playerSprites.delete(id);
+        removeEntity(entity);
+        playerEntities.delete(id);
       }
     }
   }
 
   function syncMonsters(monsters) {
+    const now = performance.now();
     const seen = new Set();
     monsters.forEach((monster) => {
       seen.add(monster.id);
-      if (!monsterSprites.has(monster.id)) {
+      let entity = monsterEntities.get(monster.id);
+      if (!entity) {
         const texture = textures[monster.kind] || textures.slime;
         const sprite = new PIXI.Sprite(texture);
         sprite.anchor.set(0.5, 0.9);
         entityLayer.addChild(sprite);
-        monsterSprites.set(monster.id, sprite);
+        entity = createEntityState(sprite, monster.x, monster.y, now);
+        monsterEntities.set(monster.id, entity);
+      } else {
+        updateEntityTarget(entity, monster.x, monster.y, now);
       }
-      const sprite = monsterSprites.get(monster.id);
-      sprite.x = (monster.x + 0.5) * tileSize;
-      sprite.y = (monster.y + 0.9) * tileSize;
     });
 
-    for (const [id, sprite] of monsterSprites.entries()) {
+    for (const [id, entity] of monsterEntities.entries()) {
       if (!seen.has(id)) {
-        if (sprite.parent) {
-          sprite.parent.removeChild(sprite);
-        }
-        sprite.destroy();
-        monsterSprites.delete(id);
+        removeEntity(entity);
+        monsterEntities.delete(id);
       }
     }
   }
@@ -242,9 +251,10 @@
   }
 
   function updateCamera() {
-    if (!playerState) return;
-    const targetX = app.renderer.width / 2 - playerState.x * tileSize;
-    const targetY = app.renderer.height / 2 - playerState.y * tileSize;
+    const playerEntity = playerEntities.get(playerId);
+    if (!playerEntity) return;
+    const targetX = app.renderer.width / 2 - playerEntity.x * tileSize;
+    const targetY = app.renderer.height / 2 - playerEntity.y * tileSize;
     world.x = Math.round(targetX);
     world.y = Math.round(targetY);
   }
@@ -365,6 +375,59 @@
     ws.send(JSON.stringify(payload));
   }
 
+  function createEntityState(sprite, x, y, now) {
+    return {
+      sprite,
+      x,
+      y,
+      startX: x,
+      startY: y,
+      targetX: x,
+      targetY: y,
+      startTime: now,
+      hp: null,
+    };
+  }
+
+  function updateEntityTarget(entity, x, y, now) {
+    entity.startX = entity.x;
+    entity.startY = entity.y;
+    entity.targetX = x;
+    entity.targetY = y;
+    entity.startTime = now;
+  }
+
+  function removeEntity(entity) {
+    if (entity.sprite.parent) {
+      entity.sprite.parent.removeChild(entity.sprite);
+    }
+    entity.sprite.destroy();
+  }
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function updateEntities(now) {
+    const alpha = (startTime) => Math.min(1, (now - startTime) / INTERP_MS);
+
+    for (const entity of playerEntities.values()) {
+      const t = alpha(entity.startTime);
+      entity.x = lerp(entity.startX, entity.targetX, t);
+      entity.y = lerp(entity.startY, entity.targetY, t);
+      entity.sprite.x = (entity.x + 0.5) * tileSize;
+      entity.sprite.y = (entity.y + 0.9) * tileSize;
+    }
+
+    for (const entity of monsterEntities.values()) {
+      const t = alpha(entity.startTime);
+      entity.x = lerp(entity.startX, entity.targetX, t);
+      entity.y = lerp(entity.startY, entity.targetY, t);
+      entity.sprite.x = (entity.x + 0.5) * tileSize;
+      entity.sprite.y = (entity.y + 0.9) * tileSize;
+    }
+  }
+
   function connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
@@ -385,6 +448,7 @@
           worldSeed = msg.world.seed;
           msg.npcs.forEach((npc) => addNpc(npc));
           statusEl.textContent = `HP ${msg.player.hp}`;
+          syncPlayers([msg.player]);
           requestChunksAround();
           break;
         }
@@ -478,7 +542,17 @@
   }, 90);
 
   app.ticker.add(() => {
+    const now = performance.now();
+    updateEntities(now);
     updateCamera();
+    if (now - lastStatusUpdate > 200 && playerId) {
+      const playerEntity = playerEntities.get(playerId);
+      if (playerEntity) {
+        const hp = playerEntity.hp != null ? playerEntity.hp : playerState?.hp ?? 0;
+        statusEl.textContent = `HP ${hp} | ${playerEntity.x.toFixed(1)}, ${playerEntity.y.toFixed(1)}`;
+      }
+      lastStatusUpdate = now;
+    }
   });
 
   fetch('/api/session')

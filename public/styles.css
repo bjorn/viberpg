@@ -101,9 +101,11 @@ canvas {
 
 #chat-log {
   height: 140px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   font-size: 18px;
   color: var(--text);
+  padding-right: 4px;
 }
 
 #chat-log .line {

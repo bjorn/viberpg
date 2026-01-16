@@ -73,7 +73,7 @@ async fn main() -> AppResult<()> {
         .nest_service("/", ServeDir::new("public").append_index_html_on_directories(true))
         .with_state(app_state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     info!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
