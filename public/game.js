@@ -37,11 +37,13 @@
   world.addChild(tileLayer, resourceLayer, entityLayer, projectileLayer);
   app.stage.addChild(world);
 
-  const assetUrls = [
+  const tileAssetUrls = [
     'assets/tiles/grass.svg',
     'assets/tiles/water.svg',
     'assets/tiles/sand.svg',
     'assets/tiles/dirt.svg',
+  ];
+  const entityAssetUrls = [
     'assets/entities/tree.svg',
     'assets/entities/rock.svg',
     'assets/entities/player.svg',
@@ -50,8 +52,9 @@
     'assets/entities/slime.svg',
     'assets/entities/arrow.svg',
   ];
-  await PIXI.Assets.load(assetUrls);
-  const textures = buildTextures();
+  await PIXI.Assets.load([...tileAssetUrls, ...entityAssetUrls]);
+  let textures = null;
+  let tileAtlasSize = null;
 
   const chunkTiles = new Map();
   const resourceSprites = new Map();
@@ -286,25 +289,44 @@
   }
 
   function drawChunk(chunk) {
+    ensureTextures();
     const key = chunkKey(chunk.chunk_x, chunk.chunk_y);
     pendingChunks.delete(key);
     if (!chunkTiles.has(key)) {
-      const container = new PIXI.Container();
-      container.x = chunk.chunk_x * chunkSize * tileSize;
-      container.y = chunk.chunk_y * chunkSize * tileSize;
+      const container = createTilemapLayer();
+      const chunkX = chunk.chunk_x * chunkSize * tileSize;
+      const chunkY = chunk.chunk_y * chunkSize * tileSize;
+      container.x = chunkX;
+      container.y = chunkY;
       const tiles = chunk.tiles;
+      const useTilemap = typeof container.tile === 'function';
       for (let y = 0; y < chunkSize; y += 1) {
         for (let x = 0; x < chunkSize; x += 1) {
           const tileId = tiles[y * chunkSize + x];
           const texture = textures.tiles[tileId] || textures.tiles[0];
-          const sprite = new PIXI.Sprite(texture);
-          sprite.x = x * tileSize;
-          sprite.y = y * tileSize;
-          container.addChild(sprite);
+          const px = x * tileSize;
+          const py = y * tileSize;
+          if (useTilemap) {
+            container.tile(texture, px, py);
+          } else {
+            const sprite = new PIXI.Sprite(texture);
+            sprite.x = px;
+            sprite.y = py;
+            container.addChild(sprite);
+          }
         }
       }
       tileLayer.addChild(container);
-      chunkTiles.set(key, container);
+      chunkTiles.set(key, {
+        container,
+        bounds: {
+          x: chunkX,
+          y: chunkY,
+          width: chunkSize * tileSize,
+          height: chunkSize * tileSize,
+        },
+      });
+      updateChunkVisibility();
     }
     loadedChunks.add(key);
     chunk.resources.forEach((res) => upsertResource(res));
@@ -438,17 +460,55 @@
     const targetY = app.renderer.height / 2 - playerEntity.y * tileSize;
     world.x = Math.round(targetX);
     world.y = Math.round(targetY);
+    updateChunkVisibility();
   }
 
-  function buildTextures() {
-    const textures = {
-      tiles: {},
-    };
+  function createTilemapLayer() {
+    const TilemapConstructor =
+      PIXI.tilemap?.CompositeTilemap ||
+      PIXI.tilemap?.Tilemap ||
+      PIXI.CompositeTilemap ||
+      PIXI.Tilemap;
+    if (TilemapConstructor) {
+      return new TilemapConstructor();
+    }
+    return new PIXI.Container();
+  }
 
-    textures.tiles[0] = PIXI.Texture.from('assets/tiles/grass.svg');
-    textures.tiles[1] = PIXI.Texture.from('assets/tiles/water.svg');
-    textures.tiles[2] = PIXI.Texture.from('assets/tiles/sand.svg');
-    textures.tiles[3] = PIXI.Texture.from('assets/tiles/dirt.svg');
+  function ensureTextures() {
+    if (!textures || tileAtlasSize !== tileSize) {
+      textures = buildTextures(tileSize);
+      tileAtlasSize = tileSize;
+    }
+  }
+
+  function buildTileAtlas(tileSize) {
+    const atlasCanvas = document.createElement('canvas');
+    atlasCanvas.width = tileSize * tileAssetUrls.length;
+    atlasCanvas.height = tileSize;
+    const ctx = atlasCanvas.getContext('2d');
+    tileAssetUrls.forEach((url, index) => {
+      const texture = PIXI.Texture.from(url);
+      const source = texture.baseTexture?.resource?.source;
+      if (source) {
+        ctx.drawImage(source, index * tileSize, 0, tileSize, tileSize);
+      }
+    });
+    const baseTexture = PIXI.BaseTexture.from(atlasCanvas);
+    const tiles = {};
+    tileAssetUrls.forEach((_, index) => {
+      tiles[index] = new PIXI.Texture(
+        baseTexture,
+        new PIXI.Rectangle(index * tileSize, 0, tileSize, tileSize),
+      );
+    });
+    return tiles;
+  }
+
+  function buildTextures(tileSize) {
+    const textures = {
+      tiles: buildTileAtlas(tileSize),
+    };
 
     textures.tree = PIXI.Texture.from('assets/entities/tree.svg');
     textures.rock = PIXI.Texture.from('assets/entities/rock.svg');
@@ -459,6 +519,24 @@
     textures.arrow = PIXI.Texture.from('assets/entities/arrow.svg');
 
     return textures;
+  }
+
+  function updateChunkVisibility() {
+    if (!chunkTiles.size) return;
+    const viewLeft = -world.x;
+    const viewTop = -world.y;
+    const viewRight = viewLeft + app.renderer.width;
+    const viewBottom = viewTop + app.renderer.height;
+    const padding = tileSize * chunkSize;
+    for (const { container, bounds } of chunkTiles.values()) {
+      const visible =
+        bounds.x + bounds.width > viewLeft - padding &&
+        bounds.x < viewRight + padding &&
+        bounds.y + bounds.height > viewTop - padding &&
+        bounds.y < viewBottom + padding;
+      container.visible = visible;
+      container.renderable = visible;
+    }
   }
 
   function sendMessage(payload) {
@@ -537,6 +615,7 @@
           tileSize = msg.world.tile_size;
           chunkSize = msg.world.chunk_size;
           worldSeed = msg.world.seed;
+          ensureTextures();
           msg.npcs.forEach((npc) => addNpc(npc));
           statusEl.textContent = `HP ${msg.player.hp}`;
           syncPlayers([msg.player]);
