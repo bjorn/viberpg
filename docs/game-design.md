@@ -8,7 +8,7 @@ Mistwood Vale is a small, session-based online RPG focused on exploration and li
 - Gathering loop with tools (trees with axes, rocks with pickaxes).
 - Real-time combat against monsters (no PvP).
 - NPCs with simple quest hand-ins and item rewards.
-- Visible multiplayer presence and chat.
+- Visible multiplayer presence, chat, and typing bubbles.
 - Session cookie persistence (no login required).
 
 ## Player loop

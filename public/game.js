@@ -41,6 +41,7 @@
   const monsterEntities = new Map();
   const projectileSprites = new Map();
   const npcSprites = new Map();
+  const typingIndicators = new Map();
 
   const loadedChunks = new Set();
   const pendingChunks = new Set();
@@ -48,6 +49,10 @@
   const keys = new Set();
   const INTERP_MS = 120;
   const MAX_CHAT_LINES = 60;
+  const TYPING_IDLE_MS = 1800;
+  let localTyping = false;
+  let typingTimer = null;
+  let lastTypingSent = 0;
   let lastStatusUpdate = 0;
 
   function addChat(text, className) {
@@ -61,6 +66,87 @@
     }
     if (shouldStick) {
       chatLog.scrollTop = chatLog.scrollHeight;
+    }
+  }
+
+  function setLocalTyping(nextState) {
+    if (localTyping === nextState) return;
+    localTyping = nextState;
+    if (playerId) {
+      setTypingIndicator(playerId, localTyping);
+    }
+    sendMessage({ type: 'typing', typing: localTyping });
+    if (localTyping) {
+      lastTypingSent = performance.now();
+    } else {
+      lastTypingSent = 0;
+    }
+  }
+
+  function sendTypingPing() {
+    const now = performance.now();
+    if (now - lastTypingSent > 400) {
+      sendMessage({ type: 'typing', typing: true });
+      lastTypingSent = now;
+    }
+  }
+
+  function scheduleTypingStop() {
+    if (typingTimer) {
+      clearTimeout(typingTimer);
+    }
+    typingTimer = setTimeout(() => {
+      setLocalTyping(false);
+    }, TYPING_IDLE_MS);
+  }
+
+  function removeTypingIndicator(id) {
+    const indicator = typingIndicators.get(id);
+    if (!indicator) return;
+    if (indicator.container.parent) {
+      indicator.container.parent.removeChild(indicator.container);
+    }
+    indicator.container.destroy({ children: true });
+    typingIndicators.delete(id);
+  }
+
+  function setTypingIndicator(id, typing) {
+    if (!typing) {
+      removeTypingIndicator(id);
+      return;
+    }
+    let indicator = typingIndicators.get(id);
+    if (!indicator) {
+      const container = new PIXI.Container();
+      const bubble = new PIXI.Graphics();
+      bubble.beginFill(0x0b0e14, 0.85);
+      bubble.lineStyle(1, 0x7ad5a3, 0.8);
+      bubble.drawRoundedRect(-12, -12, 24, 16, 4);
+      bubble.endFill();
+      const text = new PIXI.Text('...', {
+        fontFamily: 'VT323',
+        fontSize: 14,
+        fill: 0xe8f4ea,
+      });
+      text.anchor.set(0.5, 0.5);
+      text.y = -4;
+      container.addChild(bubble, text);
+      entityLayer.addChild(container);
+      indicator = { container, text };
+      typingIndicators.set(id, indicator);
+    }
+  }
+
+  function updateTypingIndicators(now) {
+    for (const [id, indicator] of typingIndicators.entries()) {
+      const entity = playerEntities.get(id);
+      if (!entity) {
+        continue;
+      }
+      indicator.container.x = entity.sprite.x;
+      indicator.container.y = entity.sprite.y - tileSize * 1.35;
+      const phase = Math.floor((now / 260) % 3) + 1;
+      indicator.text.text = '.'.repeat(phase);
     }
   }
 
@@ -184,6 +270,7 @@
       if (!seen.has(id)) {
         removeEntity(entity);
         playerEntities.delete(id);
+        removeTypingIndicator(id);
       }
     }
   }
@@ -479,6 +566,10 @@
           addChat(msg.text, 'system');
           break;
         }
+        case 'typing': {
+          setTypingIndicator(msg.id, msg.typing);
+          break;
+        }
         case 'dialog': {
           showDialog(msg.title, msg.text);
           break;
@@ -518,9 +609,36 @@
         sendMessage({ type: 'chat', text });
       }
       chatInput.value = '';
+      setLocalTyping(false);
+      if (typingTimer) {
+        clearTimeout(typingTimer);
+        typingTimer = null;
+      }
       chatInput.blur();
     }
     event.stopPropagation();
+  });
+
+  chatInput.addEventListener('input', () => {
+    if (!wsOpen) return;
+    if (chatInput.value.length === 0) {
+      scheduleTypingStop();
+      return;
+    }
+    if (!localTyping) {
+      setLocalTyping(true);
+    } else {
+      sendTypingPing();
+    }
+    scheduleTypingStop();
+  });
+
+  chatInput.addEventListener('blur', () => {
+    setLocalTyping(false);
+    if (typingTimer) {
+      clearTimeout(typingTimer);
+      typingTimer = null;
+    }
   });
 
   setInterval(() => {
@@ -544,6 +662,7 @@
   app.ticker.add(() => {
     const now = performance.now();
     updateEntities(now);
+    updateTypingIndicators(now);
     updateCamera();
     if (now - lastStatusUpdate > 200 && playerId) {
       const playerEntity = playerEntities.get(playerId);

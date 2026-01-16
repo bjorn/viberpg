@@ -30,6 +30,7 @@ const GATHER_RANGE: f32 = 1.1;
 const INTERACT_RANGE: f32 = 1.2;
 const SAVE_INTERVAL_MS: i64 = 5_000;
 const MAX_HP: i32 = 10;
+const TYPING_TIMEOUT_MS: i64 = 2500;
 
 const TILE_GRASS: u8 = 0;
 const TILE_WATER: u8 = 1;
@@ -197,6 +198,15 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
                 let _ = store.save_player(&doc).await;
             });
         }
+        if state.typing.remove(&sid).is_some() {
+            broadcast_message_inline(
+                &state,
+                ServerMessage::Typing {
+                    id: sid.clone(),
+                    typing: false,
+                },
+            );
+        }
     }
 
     let _ = send_task.await;
@@ -225,13 +235,15 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                 return;
             }
             let trimmed = trimmed.chars().take(160).collect::<String>();
-            let sender_name = {
-                let state = app_state.state.read().await;
-                state
+            let (sender_name, was_typing) = {
+                let mut state = app_state.state.write().await;
+                let name = state
                     .players
                     .get(sid)
                     .map(|player| player.name.clone())
-                    .unwrap_or_else(|| "Wanderer".to_string())
+                    .unwrap_or_else(|| "Wanderer".to_string());
+                let was_typing = state.typing.remove(sid).is_some();
+                (name, was_typing)
             };
             broadcast_message(
                 &app_state.state,
@@ -241,6 +253,39 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                 },
             )
             .await;
+            if was_typing {
+                broadcast_message(
+                    &app_state.state,
+                    ServerMessage::Typing {
+                        id: sid.to_string(),
+                        typing: false,
+                    },
+                )
+                .await;
+            }
+        }
+        ClientMessage::Typing { typing } => {
+            let now_ms = now_millis();
+            let mut state = app_state.state.write().await;
+            let mut should_broadcast = false;
+            if typing {
+                let was_typing = state.typing.contains_key(sid);
+                state.typing.insert(sid.to_string(), now_ms);
+                if !was_typing {
+                    should_broadcast = true;
+                }
+            } else if state.typing.remove(sid).is_some() {
+                should_broadcast = true;
+            }
+            if should_broadcast {
+                broadcast_message_inline(
+                    &state,
+                    ServerMessage::Typing {
+                        id: sid.to_string(),
+                        typing,
+                    },
+                );
+            }
         }
         ClientMessage::ChunkRequest { chunks } => {
             handle_chunk_request(app_state, sid, chunks).await;
@@ -342,6 +387,23 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
         );
         update_projectiles(&mut state, now_ms, dt, &app_state.data);
         update_resources(&mut state, now_ms, &app_state.data);
+
+        let mut expired_typing = Vec::new();
+        for (id, last) in state.typing.iter() {
+            if now_ms - *last > TYPING_TIMEOUT_MS {
+                expired_typing.push(id.clone());
+            }
+        }
+        for id in expired_typing {
+            state.typing.remove(&id);
+            broadcast_message_inline(
+                &state,
+                ServerMessage::Typing {
+                    id,
+                    typing: false,
+                },
+            );
+        }
 
         let state_msg = ServerMessage::State {
             players: state.players.values().map(PlayerPublic::from).collect(),
@@ -1334,6 +1396,7 @@ struct GameState {
     resources: HashMap<ChunkCoord, Vec<ResourceNode>>,
     spawned_chunks: HashSet<ChunkCoord>,
     clients: HashMap<String, mpsc::UnboundedSender<ServerMessage>>,
+    typing: HashMap<String, i64>,
     next_entity_id: u64,
 }
 
@@ -1347,6 +1410,7 @@ impl GameState {
             resources: HashMap::new(),
             spawned_chunks: HashSet::new(),
             clients: HashMap::new(),
+            typing: HashMap::new(),
             next_entity_id: 1,
         }
     }
@@ -1843,6 +1907,10 @@ enum ServerMessage {
     System {
         text: String,
     },
+    Typing {
+        id: String,
+        typing: bool,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -1857,6 +1925,9 @@ enum ClientMessage {
     },
     Chat {
         text: String,
+    },
+    Typing {
+        typing: bool,
     },
     ChunkRequest {
         chunks: Vec<ChunkCoord>,

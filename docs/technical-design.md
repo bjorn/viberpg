@@ -16,6 +16,7 @@ This project is a lightweight client/server game with a Rust backend and a PixiJ
 - The client requests chunks around the player (`chunk_request`).
 - The server streams `chunk_data` with tiles and resources.
 - The server broadcasts `state` ticks with players, monsters, and projectiles.
+- Typing notifications are broadcast so clients can show chat bubbles above players.
 
 ## Persistence
 
