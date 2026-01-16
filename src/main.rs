@@ -31,6 +31,8 @@ const INTERACT_RANGE: f32 = 1.2;
 const SAVE_INTERVAL_MS: i64 = 5_000;
 const MAX_HP: i32 = 10;
 const TYPING_TIMEOUT_MS: i64 = 2500;
+const CHUNK_KEEP_RADIUS: i32 = 3;
+const CHUNK_TTL_MS: i64 = 60_000;
 
 const TILE_GRASS: u8 = 0;
 const TILE_WATER: u8 = 1;
@@ -304,8 +306,10 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
         Some(sender) => sender.clone(),
         None => return,
     };
+    let now_ms = now_millis();
 
     for coord in chunks {
+        state.chunk_last_access.insert(coord, now_ms);
         if !state.spawned_chunks.contains(&coord) {
             spawn_monsters_for_chunk(
                 &mut state,
@@ -342,6 +346,65 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
             resources: visible_resources,
         });
     }
+}
+
+fn chunk_coord_for_position(x: f32, y: f32, chunk_size: i32) -> ChunkCoord {
+    let size = chunk_size as f32;
+    ChunkCoord {
+        x: (x / size).floor() as i32,
+        y: (y / size).floor() as i32,
+    }
+}
+
+fn collect_active_chunks(state: &GameState, chunk_size: i32) -> HashSet<ChunkCoord> {
+    let mut keep = HashSet::new();
+    for player in state.players.values() {
+        let center = chunk_coord_for_position(player.x, player.y, chunk_size);
+        for dx in -CHUNK_KEEP_RADIUS..=CHUNK_KEEP_RADIUS {
+            for dy in -CHUNK_KEEP_RADIUS..=CHUNK_KEEP_RADIUS {
+                keep.insert(ChunkCoord {
+                    x: center.x + dx,
+                    y: center.y + dy,
+                });
+            }
+        }
+    }
+    keep
+}
+
+fn prune_chunks(state: &mut GameState, now_ms: i64, chunk_size: i32) {
+    let keep = collect_active_chunks(state, chunk_size);
+    for coord in &keep {
+        state.chunk_last_access.insert(*coord, now_ms);
+    }
+
+    let mut expired = Vec::new();
+    for (coord, last_access) in state.chunk_last_access.iter() {
+        if keep.contains(coord) {
+            continue;
+        }
+        if now_ms - *last_access > CHUNK_TTL_MS {
+            expired.push(*coord);
+        }
+    }
+
+    if expired.is_empty() {
+        return;
+    }
+
+    let expired_set: HashSet<ChunkCoord> = expired.iter().copied().collect();
+    for coord in &expired {
+        state.chunk_last_access.remove(coord);
+        state.resources.remove(coord);
+        state.spawned_chunks.remove(coord);
+    }
+
+    state.monsters.retain(|_, monster| {
+        !expired_set.contains(&chunk_coord_for_position(monster.x, monster.y, chunk_size))
+    });
+    state.projectiles.retain(|_, projectile| {
+        !expired_set.contains(&chunk_coord_for_position(projectile.x, projectile.y, chunk_size))
+    });
 }
 
 fn spawn_game_loop(app_state: AppState) {
@@ -391,6 +454,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
         );
         update_projectiles(&mut state, now_ms, dt, &app_state.data);
         update_resources(&mut state, now_ms, &app_state.data);
+        prune_chunks(&mut state, now_ms, app_state.world.chunk_size);
 
         let mut expired_typing = Vec::new();
         for (id, last) in state.typing.iter() {
@@ -1399,6 +1463,7 @@ struct GameState {
     projectiles: HashMap<u64, Projectile>,
     resources: HashMap<ChunkCoord, Vec<ResourceNode>>,
     spawned_chunks: HashSet<ChunkCoord>,
+    chunk_last_access: HashMap<ChunkCoord, i64>,
     clients: HashMap<String, mpsc::UnboundedSender<ServerMessage>>,
     typing: HashMap<String, i64>,
     next_entity_id: u64,
@@ -1413,6 +1478,7 @@ impl GameState {
             projectiles: HashMap::new(),
             resources: HashMap::new(),
             spawned_chunks: HashSet::new(),
+            chunk_last_access: HashMap::new(),
             clients: HashMap::new(),
             typing: HashMap::new(),
             next_entity_id: 1,
