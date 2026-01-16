@@ -13,6 +13,7 @@
 - Start MongoDB: `docker compose up`.
 - Run server: `MONGODB_URI=mongodb://localhost:27017 PORT=3000 cargo run`.
 - Open `http://localhost:3000` (server serves `public/`).
+- Devcontainer: `.devcontainer/devcontainer.json` starts MongoDB automatically and forwards ports 3000/27017. Use VS Code task `Run server` to launch.
 
 ## Key files
 - `src/main.rs`: main server, game loop, WebSocket protocol, persistence.

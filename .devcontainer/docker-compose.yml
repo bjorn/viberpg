@@ -1,0 +1,22 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sleep infinity
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      PORT: "3000"
+    volumes:
+      - ..:/workspaces/viberpg:cached
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:
