@@ -81,6 +81,12 @@
     gatherPulse: false,
     interactPulse: false,
   };
+  const pointerMoveState = {
+    active: false,
+    dirX: 0,
+    dirY: 0,
+    pointerId: null,
+  };
   const INTERP_MS = 120;
   const MAX_CHAT_LINES = 60;
   const TYPING_IDLE_MS = 1800;
@@ -294,6 +300,28 @@
     touchState.dirX = clampedX / maxRadius;
     touchState.dirY = clampedY / maxRadius;
     updateJoystickVisual(clampedX, clampedY);
+  }
+
+  function updatePointerMoveFromEvent(event) {
+    const playerEntity = playerEntities.get(playerId);
+    if (!playerEntity) {
+      pointerMoveState.dirX = 0;
+      pointerMoveState.dirY = 0;
+      return;
+    }
+    const playerScreenX = (playerEntity.x + 0.5) * tileSize + world.x;
+    const playerScreenY = (playerEntity.y + 0.9) * tileSize + world.y;
+    const dx = event.clientX - playerScreenX;
+    const dy = event.clientY - playerScreenY;
+    const distance = Math.hypot(dx, dy);
+    const deadzone = tileSize * 0.25;
+    if (distance < deadzone) {
+      pointerMoveState.dirX = 0;
+      pointerMoveState.dirY = 0;
+      return;
+    }
+    pointerMoveState.dirX = dx / distance;
+    pointerMoveState.dirY = dy / distance;
   }
 
   function chunkKey(x, y) {
@@ -710,7 +738,7 @@
   }
 
   if (helpEl && window.matchMedia('(pointer: coarse)').matches) {
-    helpEl.textContent = 'Touch: drag to move · Tap Attack/Gather/Interact · Tap chat to type';
+    helpEl.textContent = 'Touch: drag screen or joystick to move · Tap Attack/Gather/Interact · Tap chat to type';
   }
 
   if (fullscreenButton) {
@@ -756,6 +784,34 @@
 
     joystickEl.addEventListener('pointerup', releaseJoystick);
     joystickEl.addEventListener('pointercancel', releaseJoystick);
+  }
+
+  if (app.canvas) {
+    app.canvas.addEventListener('pointerdown', (event) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (document.activeElement === chatInput) return;
+      pointerMoveState.active = true;
+      pointerMoveState.pointerId = event.pointerId;
+      app.canvas.setPointerCapture(event.pointerId);
+      updatePointerMoveFromEvent(event);
+    });
+
+    app.canvas.addEventListener('pointermove', (event) => {
+      if (!pointerMoveState.active || event.pointerId !== pointerMoveState.pointerId) return;
+      updatePointerMoveFromEvent(event);
+    });
+
+    const releasePointerMove = (event) => {
+      if (!pointerMoveState.active || event.pointerId !== pointerMoveState.pointerId) return;
+      pointerMoveState.active = false;
+      pointerMoveState.pointerId = null;
+      pointerMoveState.dirX = 0;
+      pointerMoveState.dirY = 0;
+    };
+
+    app.canvas.addEventListener('pointerup', releasePointerMove);
+    app.canvas.addEventListener('pointercancel', releasePointerMove);
+    app.canvas.addEventListener('pointerleave', releasePointerMove);
   }
 
   actionButtons.forEach((button) => {
@@ -835,16 +891,21 @@
     if (!wsOpen) return;
     const inputLocked = document.activeElement === chatInput;
     const usingTouch = touchState.active;
+    const usingPointerMove = pointerMoveState.active;
     const dirX = inputLocked
       ? 0
       : usingTouch
         ? touchState.dirX
-        : (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+        : usingPointerMove
+          ? pointerMoveState.dirX
+          : (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
     const dirY = inputLocked
       ? 0
       : usingTouch
         ? touchState.dirY
-        : (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
+        : usingPointerMove
+          ? pointerMoveState.dirY
+          : (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
     const attack = !inputLocked && (keys.has('Space') || touchState.attack || touchState.attackPulse);
     const gather = !inputLocked && (keys.has('KeyF') || touchState.gather || touchState.gatherPulse);
     const interact = !inputLocked && (keys.has('KeyE') || touchState.interact || touchState.interactPulse);
