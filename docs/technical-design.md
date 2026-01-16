@@ -42,3 +42,4 @@ Adjusting these files changes behavior without code changes.
 
 - `Dockerfile` builds a production-ready server image with the static assets and data files bundled.
 - `docker-compose.prod.yml` shows an example setup for MongoDB plus the server behind an nginx-proxy/ACME stack. Update `VIRTUAL_HOST`, `LETSENCRYPT_HOST`, and `LETSENCRYPT_EMAIL` to match your domain and mail.
+- A GitHub Actions workflow in `.github/workflows/docker-publish.yml` publishes the image to GHCR on pushes to `master`.
