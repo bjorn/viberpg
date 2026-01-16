@@ -1,0 +1,22 @@
+[
+  {
+    "id": "tree",
+    "name": "Tree",
+    "tool": "axe",
+    "hp": 3,
+    "respawn_ms": 45000,
+    "drops": [
+      { "id": "wood", "count": 2 }
+    ]
+  },
+  {
+    "id": "rock",
+    "name": "Rock",
+    "tool": "pick",
+    "hp": 4,
+    "respawn_ms": 60000,
+    "drops": [
+      { "id": "stone", "count": 2 }
+    ]
+  }
+]

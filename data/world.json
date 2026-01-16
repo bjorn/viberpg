@@ -1,0 +1,7 @@
+{
+  "seed": 1337,
+  "chunk_size": 32,
+  "tile_size": 16,
+  "spawn_x": 8,
+  "spawn_y": 8
+}

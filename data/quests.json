@@ -1,0 +1,27 @@
+[
+  {
+    "id": "quest_lumber",
+    "npc_id": "npc_logger",
+    "name": "Lumber for the Camp",
+    "description": "Bring 5 wood to Edda.",
+    "requires": [
+      { "id": "wood", "count": 5 }
+    ],
+    "rewards": [
+      { "id": "fine_axe", "count": 1 }
+    ]
+  },
+  {
+    "id": "quest_hunter",
+    "npc_id": "npc_hunter",
+    "name": "Slime Cores",
+    "description": "Bring 3 slime cores to Bram.",
+    "requires": [
+      { "id": "slime_core", "count": 3 }
+    ],
+    "rewards": [
+      { "id": "bow", "count": 1 },
+      { "id": "arrow", "count": 12 }
+    ]
+  }
+]

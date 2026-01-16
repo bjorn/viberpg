@@ -1,0 +1,110 @@
+[
+  {
+    "id": "wood",
+    "name": "Wood",
+    "kind": "resource",
+    "tool": null,
+    "power": null,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "stone",
+    "name": "Stone",
+    "kind": "resource",
+    "tool": null,
+    "power": null,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "slime_core",
+    "name": "Slime Core",
+    "kind": "resource",
+    "tool": null,
+    "power": null,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "arrow",
+    "name": "Arrow",
+    "kind": "ammo",
+    "tool": null,
+    "power": null,
+    "weapon": null,
+    "ammo_for": "bow"
+  },
+  {
+    "id": "basic_axe",
+    "name": "Basic Axe",
+    "kind": "tool",
+    "tool": "axe",
+    "power": 1,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "fine_axe",
+    "name": "Fine Axe",
+    "kind": "tool",
+    "tool": "axe",
+    "power": 2,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "basic_pick",
+    "name": "Basic Pickaxe",
+    "kind": "tool",
+    "tool": "pick",
+    "power": 1,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "rusty_sword",
+    "name": "Rusty Sword",
+    "kind": "weapon",
+    "tool": null,
+    "power": null,
+    "weapon": {
+      "kind": "melee",
+      "damage": 2,
+      "range": 1.1,
+      "cooldown_ms": 450,
+      "projectile_speed": null
+    },
+    "ammo_for": null
+  },
+  {
+    "id": "iron_sword",
+    "name": "Iron Sword",
+    "kind": "weapon",
+    "tool": null,
+    "power": null,
+    "weapon": {
+      "kind": "melee",
+      "damage": 4,
+      "range": 1.25,
+      "cooldown_ms": 420,
+      "projectile_speed": null
+    },
+    "ammo_for": null
+  },
+  {
+    "id": "bow",
+    "name": "Bow",
+    "kind": "weapon",
+    "tool": null,
+    "power": null,
+    "weapon": {
+      "kind": "ranged",
+      "damage": 2,
+      "range": 6.5,
+      "cooldown_ms": 650,
+      "projectile_speed": 8.0
+    },
+    "ammo_for": "arrow"
+  }
+]

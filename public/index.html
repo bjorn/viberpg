@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Online RPG - Mistwood Vale</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="hud">
+    <div id="title">Mistwood Vale</div>
+    <div id="status">Connecting...</div>
+    <div id="help">WASD move · Space attack · F gather · E interact · Enter chat</div>
+
+    <div id="dialog" class="panel hidden">
+      <div id="dialog-title"></div>
+      <div id="dialog-text"></div>
+    </div>
+
+    <div id="chat" class="panel">
+      <div id="chat-log"></div>
+      <input id="chat-input" type="text" maxlength="160" placeholder="Say something..." />
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

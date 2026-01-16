@@ -1,0 +1,16 @@
+[
+  {
+    "id": "npc_logger",
+    "name": "Edda the Logger",
+    "x": 10.0,
+    "y": 10.0,
+    "dialog": "A sturdy axe makes all the difference."
+  },
+  {
+    "id": "npc_hunter",
+    "name": "Bram the Hunter",
+    "x": 15.0,
+    "y": 6.0,
+    "dialog": "Slimes love damp shade. Bring me their cores."
+  }
+]
