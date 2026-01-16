@@ -5,6 +5,10 @@
   const dialogEl = document.getElementById('dialog');
   const dialogTitle = document.getElementById('dialog-title');
   const dialogText = document.getElementById('dialog-text');
+  const helpEl = document.getElementById('help');
+  const joystickEl = document.getElementById('touch-joystick');
+  const joystickHandle = joystickEl ? joystickEl.querySelector('.stick-handle') : null;
+  const actionButtons = Array.from(document.querySelectorAll('.action-btn'));
 
   let dialogTimer = null;
   let ws = null;
@@ -47,6 +51,17 @@
   const pendingChunks = new Set();
 
   const keys = new Set();
+  const touchState = {
+    active: false,
+    dirX: 0,
+    dirY: 0,
+    attack: false,
+    gather: false,
+    interact: false,
+    attackPulse: false,
+    gatherPulse: false,
+    interactPulse: false,
+  };
   const INTERP_MS = 120;
   const MAX_CHAT_LINES = 60;
   const TYPING_IDLE_MS = 1800;
@@ -54,6 +69,9 @@
   let typingTimer = null;
   let lastTypingSent = 0;
   let lastStatusUpdate = 0;
+  let joystickPointerId = null;
+  let joystickCenter = { x: 0, y: 0 };
+  let joystickMaxRadius = 0;
 
   function addChat(text, className) {
     const line = document.createElement('div');
@@ -160,6 +178,68 @@
     dialogTimer = setTimeout(() => {
       dialogEl.classList.add('hidden');
     }, 5000);
+  }
+
+  const actionButtonsByAction = new Map();
+  actionButtons.forEach((button) => {
+    const action = button.dataset.action;
+    if (action) {
+      actionButtonsByAction.set(action, button);
+    }
+  });
+
+  function setActionState(action, isActive) {
+    if (!(action in touchState)) return;
+    touchState[action] = isActive;
+    const button = actionButtonsByAction.get(action);
+    if (button) {
+      button.classList.toggle('active', isActive);
+    }
+  }
+
+  function pulseAction(action) {
+    const pulseKey = `${action}Pulse`;
+    if (pulseKey in touchState) {
+      touchState[pulseKey] = true;
+    }
+  }
+
+  function updateJoystickVisual(dx, dy) {
+    if (!joystickHandle) return;
+    joystickHandle.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`;
+  }
+
+  function updateJoystickMetrics() {
+    if (!joystickEl || !joystickHandle) return;
+    const rect = joystickEl.getBoundingClientRect();
+    const handleRadius = joystickHandle.offsetWidth / 2;
+    joystickCenter = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+    joystickMaxRadius = Math.max(12, rect.width / 2 - handleRadius);
+  }
+
+  function updateJoystickFromEvent(event) {
+    if (!joystickEl) return;
+    const dx = event.clientX - joystickCenter.x;
+    const dy = event.clientY - joystickCenter.y;
+    const distance = Math.hypot(dx, dy);
+    const maxRadius = joystickMaxRadius || 1;
+    const deadzone = maxRadius * 0.18;
+    if (distance < deadzone) {
+      touchState.dirX = 0;
+      touchState.dirY = 0;
+      updateJoystickVisual(0, 0);
+      return;
+    }
+    const clamped = Math.min(distance, maxRadius);
+    const angle = Math.atan2(dy, dx);
+    const clampedX = Math.cos(angle) * clamped;
+    const clampedY = Math.sin(angle) * clamped;
+    touchState.dirX = clampedX / maxRadius;
+    touchState.dirY = clampedY / maxRadius;
+    updateJoystickVisual(clampedX, clampedY);
   }
 
   function chunkKey(x, y) {
@@ -586,6 +666,60 @@
     });
   }
 
+  if (helpEl && window.matchMedia('(pointer: coarse)').matches) {
+    helpEl.textContent = 'Touch: drag to move · Tap Attack/Gather/Interact · Tap chat to type';
+  }
+
+  if (joystickEl && joystickHandle) {
+    joystickEl.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      joystickPointerId = event.pointerId;
+      joystickEl.setPointerCapture(event.pointerId);
+      updateJoystickMetrics();
+      touchState.active = true;
+      joystickEl.classList.add('is-active');
+      updateJoystickFromEvent(event);
+    });
+
+    joystickEl.addEventListener('pointermove', (event) => {
+      if (event.pointerId !== joystickPointerId) return;
+      event.preventDefault();
+      updateJoystickFromEvent(event);
+    });
+
+    const releaseJoystick = (event) => {
+      if (event.pointerId !== joystickPointerId) return;
+      event.preventDefault();
+      joystickPointerId = null;
+      touchState.active = false;
+      touchState.dirX = 0;
+      touchState.dirY = 0;
+      joystickEl.classList.remove('is-active');
+      updateJoystickVisual(0, 0);
+    };
+
+    joystickEl.addEventListener('pointerup', releaseJoystick);
+    joystickEl.addEventListener('pointercancel', releaseJoystick);
+  }
+
+  actionButtons.forEach((button) => {
+    const action = button.dataset.action;
+    if (!action) return;
+    button.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      button.setPointerCapture(event.pointerId);
+      setActionState(action, true);
+      pulseAction(action);
+    });
+    const releaseAction = (event) => {
+      event.preventDefault();
+      setActionState(action, false);
+    };
+    button.addEventListener('pointerup', releaseAction);
+    button.addEventListener('pointercancel', releaseAction);
+    button.addEventListener('pointerleave', releaseAction);
+  });
+
   window.addEventListener('keydown', (event) => {
     if (document.activeElement === chatInput) return;
     keys.add(event.code);
@@ -643,12 +777,21 @@
 
   setInterval(() => {
     if (!wsOpen) return;
-    if (document.activeElement === chatInput) return;
-    const dirX = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
-    const dirY = (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
-    const attack = keys.has('Space');
-    const gather = keys.has('KeyF');
-    const interact = keys.has('KeyE');
+    const inputLocked = document.activeElement === chatInput;
+    const usingTouch = touchState.active;
+    const dirX = inputLocked
+      ? 0
+      : usingTouch
+        ? touchState.dirX
+        : (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+    const dirY = inputLocked
+      ? 0
+      : usingTouch
+        ? touchState.dirY
+        : (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
+    const attack = !inputLocked && (keys.has('Space') || touchState.attack || touchState.attackPulse);
+    const gather = !inputLocked && (keys.has('KeyF') || touchState.gather || touchState.gatherPulse);
+    const interact = !inputLocked && (keys.has('KeyE') || touchState.interact || touchState.interactPulse);
     sendMessage({
       type: 'input',
       dir_x: dirX,
@@ -657,6 +800,9 @@
       gather,
       interact,
     });
+    touchState.attackPulse = false;
+    touchState.gatherPulse = false;
+    touchState.interactPulse = false;
   }, 90);
 
   app.ticker.add(() => {

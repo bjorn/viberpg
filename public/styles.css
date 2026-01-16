@@ -127,8 +127,148 @@ canvas {
   outline: none;
 }
 
+#touch-controls {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: none;
+}
+
+.touch-surface {
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+
+#touch-joystick {
+  position: absolute;
+  left: calc(16px + env(safe-area-inset-left));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  width: 140px;
+  height: 140px;
+}
+
+#touch-joystick .stick-base {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(8, 12, 16, 0.55);
+  border: 1px solid rgba(122, 213, 163, 0.35);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45), inset 0 0 18px rgba(13, 40, 28, 0.6);
+}
+
+#touch-joystick .stick-handle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(122, 213, 163, 0.85);
+  border: 1px solid rgba(232, 244, 234, 0.6);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  transition: transform 0.12s ease-out;
+}
+
+#touch-joystick.is-active .stick-handle {
+  background: rgba(240, 211, 132, 0.9);
+  transition: none;
+}
+
+#touch-actions {
+  position: absolute;
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.action-btn {
+  width: 108px;
+  height: 56px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(10, 14, 20, 0.85);
+  color: var(--text);
+  font-family: "VT323", monospace;
+  font-size: 20px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45), inset 0 0 12px rgba(6, 12, 20, 0.7);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+
+.action-btn[data-action="attack"] {
+  border-color: rgba(248, 120, 96, 0.6);
+  color: #f7b1a0;
+}
+
+.action-btn[data-action="gather"] {
+  border-color: rgba(240, 211, 132, 0.6);
+  color: #f0d384;
+}
+
+.action-btn[data-action="interact"] {
+  border-color: rgba(122, 213, 163, 0.6);
+  color: #9fe7bf;
+}
+
+.action-btn.active {
+  transform: translateY(2px);
+  filter: brightness(1.12);
+}
+
 .hidden {
   display: none;
+}
+
+@media (pointer: coarse) {
+  #touch-controls {
+    display: block;
+  }
+
+  #help {
+    display: none;
+  }
+
+  #chat {
+    right: 12px;
+    top: 12px;
+    bottom: auto;
+    width: min(320px, 68vw);
+  }
+
+  #dialog {
+    left: 12px;
+    width: min(320px, 72vw);
+    bottom: calc(180px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (pointer: coarse) and (max-width: 520px) {
+  #touch-joystick {
+    width: 120px;
+    height: 120px;
+  }
+
+  #touch-joystick .stick-handle {
+    width: 50px;
+    height: 50px;
+  }
+
+  .action-btn {
+    width: 92px;
+    height: 50px;
+    font-size: 18px;
+  }
 }
 
 @media (max-width: 700px) {
@@ -140,7 +280,9 @@ canvas {
     width: 240px;
     font-size: 16px;
   }
+}
 
+@media (max-width: 700px) and (pointer: fine) {
   #chat,
   #dialog {
     width: 260px;

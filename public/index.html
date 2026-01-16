@@ -22,6 +22,18 @@
       <div id="chat-log"></div>
       <input id="chat-input" type="text" maxlength="160" placeholder="Say something..." />
     </div>
+
+    <div id="touch-controls">
+      <div id="touch-joystick" class="touch-surface">
+        <div class="stick-base"></div>
+        <div class="stick-handle"></div>
+      </div>
+      <div id="touch-actions" class="touch-surface">
+        <button class="action-btn" data-action="attack" type="button">Attack</button>
+        <button class="action-btn" data-action="gather" type="button">Gather</button>
+        <button class="action-btn" data-action="interact" type="button">Interact</button>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
