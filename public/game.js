@@ -1,4 +1,4 @@
-(() => {
+(async () => {
   const statusEl = document.getElementById('status');
   const chatLog = document.getElementById('chat-log');
   const chatInput = document.getElementById('chat-input');
@@ -14,7 +14,7 @@
   let ws = null;
   let wsOpen = false;
 
-  let tileSize = 16;
+  let tileSize = 32;
   let chunkSize = 32;
   let playerId = null;
   let playerState = null;
@@ -37,6 +37,20 @@
   world.addChild(tileLayer, resourceLayer, entityLayer, projectileLayer);
   app.stage.addChild(world);
 
+  const assetUrls = [
+    'assets/tiles/grass.svg',
+    'assets/tiles/water.svg',
+    'assets/tiles/sand.svg',
+    'assets/tiles/dirt.svg',
+    'assets/entities/tree.svg',
+    'assets/entities/rock.svg',
+    'assets/entities/player.svg',
+    'assets/entities/player-alt.svg',
+    'assets/entities/npc.svg',
+    'assets/entities/slime.svg',
+    'assets/entities/arrow.svg',
+  ];
+  await PIXI.Assets.load(assetUrls);
   const textures = buildTextures();
 
   const chunkTiles = new Map();
@@ -427,112 +441,22 @@
   }
 
   function buildTextures() {
-    const makeTexture = (draw) => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 16;
-      canvas.height = 16;
-      const ctx = canvas.getContext('2d');
-      ctx.imageSmoothingEnabled = false;
-      draw(ctx);
-      return PIXI.Texture.from(canvas);
-    };
-
     const textures = {
       tiles: {},
     };
 
-    textures.tiles[0] = makeTexture((ctx) => {
-      ctx.fillStyle = '#4b8c3f';
-      ctx.fillRect(0, 0, 16, 16);
-      ctx.fillStyle = '#3f7b33';
-      ctx.fillRect(2, 2, 2, 2);
-      ctx.fillRect(10, 5, 2, 2);
-      ctx.fillRect(6, 11, 2, 2);
-    });
+    textures.tiles[0] = PIXI.Texture.from('assets/tiles/grass.svg');
+    textures.tiles[1] = PIXI.Texture.from('assets/tiles/water.svg');
+    textures.tiles[2] = PIXI.Texture.from('assets/tiles/sand.svg');
+    textures.tiles[3] = PIXI.Texture.from('assets/tiles/dirt.svg');
 
-    textures.tiles[1] = makeTexture((ctx) => {
-      ctx.fillStyle = '#2a5faa';
-      ctx.fillRect(0, 0, 16, 16);
-      ctx.fillStyle = '#3a79c7';
-      ctx.fillRect(1, 4, 6, 2);
-      ctx.fillRect(8, 9, 6, 2);
-    });
-
-    textures.tiles[2] = makeTexture((ctx) => {
-      ctx.fillStyle = '#c2a768';
-      ctx.fillRect(0, 0, 16, 16);
-      ctx.fillStyle = '#b89752';
-      ctx.fillRect(4, 4, 3, 3);
-      ctx.fillRect(9, 9, 3, 3);
-    });
-
-    textures.tiles[3] = makeTexture((ctx) => {
-      ctx.fillStyle = '#7a5a3a';
-      ctx.fillRect(0, 0, 16, 16);
-      ctx.fillStyle = '#6a4c2f';
-      ctx.fillRect(3, 3, 2, 2);
-      ctx.fillRect(10, 6, 2, 2);
-    });
-
-    textures.tree = makeTexture((ctx) => {
-      ctx.fillStyle = '#2d6b39';
-      ctx.fillRect(3, 2, 10, 7);
-      ctx.fillStyle = '#3f8d4a';
-      ctx.fillRect(4, 3, 8, 5);
-      ctx.fillStyle = '#3b2a1c';
-      ctx.fillRect(7, 9, 2, 5);
-    });
-
-    textures.rock = makeTexture((ctx) => {
-      ctx.fillStyle = '#70757d';
-      ctx.fillRect(4, 7, 8, 6);
-      ctx.fillStyle = '#8b9199';
-      ctx.fillRect(6, 8, 4, 2);
-    });
-
-    textures.player = makeTexture((ctx) => {
-      ctx.fillStyle = '#e3b98d';
-      ctx.fillRect(6, 3, 4, 4);
-      ctx.fillStyle = '#28427c';
-      ctx.fillRect(5, 7, 6, 6);
-      ctx.fillStyle = '#1f2b4a';
-      ctx.fillRect(6, 11, 4, 3);
-    });
-
-    textures.playerAlt = makeTexture((ctx) => {
-      ctx.fillStyle = '#d9a86c';
-      ctx.fillRect(6, 3, 4, 4);
-      ctx.fillStyle = '#7b3a2c';
-      ctx.fillRect(5, 7, 6, 6);
-      ctx.fillStyle = '#5a2a1e';
-      ctx.fillRect(6, 11, 4, 3);
-    });
-
-    textures.npc = makeTexture((ctx) => {
-      ctx.fillStyle = '#d6c18e';
-      ctx.fillRect(6, 3, 4, 4);
-      ctx.fillStyle = '#4b6b2e';
-      ctx.fillRect(5, 7, 6, 6);
-      ctx.fillStyle = '#2e4a1a';
-      ctx.fillRect(6, 11, 4, 3);
-    });
-
-    textures.slime = makeTexture((ctx) => {
-      ctx.fillStyle = '#3dbd7d';
-      ctx.fillRect(4, 7, 8, 6);
-      ctx.fillStyle = '#2a8a5c';
-      ctx.fillRect(5, 8, 6, 3);
-      ctx.fillStyle = '#0b2b1c';
-      ctx.fillRect(6, 9, 1, 1);
-      ctx.fillRect(9, 9, 1, 1);
-    });
-
-    textures.arrow = makeTexture((ctx) => {
-      ctx.fillStyle = '#e9d6a4';
-      ctx.fillRect(7, 2, 2, 12);
-      ctx.fillStyle = '#8a6d3b';
-      ctx.fillRect(7, 9, 2, 4);
-    });
+    textures.tree = PIXI.Texture.from('assets/entities/tree.svg');
+    textures.rock = PIXI.Texture.from('assets/entities/rock.svg');
+    textures.player = PIXI.Texture.from('assets/entities/player.svg');
+    textures.playerAlt = PIXI.Texture.from('assets/entities/player-alt.svg');
+    textures.npc = PIXI.Texture.from('assets/entities/npc.svg');
+    textures.slime = PIXI.Texture.from('assets/entities/slime.svg');
+    textures.arrow = PIXI.Texture.from('assets/entities/arrow.svg');
 
     return textures;
   }
