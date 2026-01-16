@@ -489,11 +489,13 @@
     atlasCanvas.height = tileSize;
     const ctx = atlasCanvas.getContext('2d');
     tileAssetUrls.forEach((url, index) => {
-      const texture = PIXI.Texture.from(url);
-      const source = texture.source?.resource?.source || texture.baseTexture?.resource?.source;
-      if (source) {
-        ctx.drawImage(source, index * tileSize, 0, tileSize, tileSize);
+      const texture = PIXI.Assets.get(url) || PIXI.Texture.from(url);
+      const resource = texture.source?.resource || texture.baseTexture?.resource;
+      const source = resource?.source || resource;
+      if (!source) {
+        return;
       }
+      ctx.drawImage(source, index * tileSize, 0, tileSize, tileSize);
     });
     const atlasTexture = PIXI.Texture.from(atlasCanvas);
     const tiles = {};
