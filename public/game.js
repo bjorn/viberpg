@@ -6,6 +6,7 @@
   const dialogTitle = document.getElementById('dialog-title');
   const dialogText = document.getElementById('dialog-text');
   const helpEl = document.getElementById('help');
+  const fullscreenButton = document.getElementById('fullscreen-toggle');
   const joystickEl = document.getElementById('touch-joystick');
   const joystickHandle = joystickEl ? joystickEl.querySelector('.stick-handle') : null;
   const actionButtons = Array.from(document.querySelectorAll('.action-btn'));
@@ -196,6 +197,41 @@
     dialogTimer = setTimeout(() => {
       dialogEl.classList.add('hidden');
     }, 5000);
+  }
+
+  function getFullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement;
+  }
+
+  function updateFullscreenButton() {
+    if (!fullscreenButton) return;
+    const active = Boolean(getFullscreenElement());
+    fullscreenButton.classList.toggle('active', active);
+    fullscreenButton.setAttribute('aria-pressed', String(active));
+    const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
+    fullscreenButton.setAttribute('aria-label', label);
+    fullscreenButton.setAttribute('title', label);
+  }
+
+  async function requestFullscreen() {
+    const target = document.documentElement;
+    if (target.requestFullscreen) {
+      await target.requestFullscreen();
+      return;
+    }
+    if (target.webkitRequestFullscreen) {
+      await target.webkitRequestFullscreen();
+    }
+  }
+
+  async function exitFullscreen() {
+    if (document.exitFullscreen) {
+      await document.exitFullscreen();
+      return;
+    }
+    if (document.webkitExitFullscreen) {
+      await document.webkitExitFullscreen();
+    }
   }
 
   const actionButtonsByAction = new Map();
@@ -675,6 +711,19 @@
 
   if (helpEl && window.matchMedia('(pointer: coarse)').matches) {
     helpEl.textContent = 'Touch: drag to move · Tap Attack/Gather/Interact · Tap chat to type';
+  }
+
+  if (fullscreenButton) {
+    updateFullscreenButton();
+    fullscreenButton.addEventListener('click', async () => {
+      if (getFullscreenElement()) {
+        await exitFullscreen();
+      } else {
+        await requestFullscreen();
+      }
+    });
+    document.addEventListener('fullscreenchange', updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
   }
 
   if (joystickEl && joystickHandle) {

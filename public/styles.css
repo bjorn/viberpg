@@ -60,6 +60,39 @@ canvas {
   color: var(--accent-2);
 }
 
+#fullscreen-toggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  min-width: 40px;
+  min-height: 40px;
+  font-family: "VT323", monospace;
+  font-size: 18px;
+  line-height: 0;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+#fullscreen-toggle.active {
+  color: var(--accent-2);
+  border-color: rgba(240, 211, 132, 0.6);
+}
+
+#fullscreen-toggle .fullscreen-icon {
+  width: 20px;
+  height: 20px;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -239,6 +272,15 @@ canvas {
     display: none;
   }
 
+  #fullscreen-toggle {
+    top: auto;
+    right: calc(16px + env(safe-area-inset-right));
+    bottom: calc(210px + env(safe-area-inset-bottom));
+    padding: 8px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   #chat {
     right: 12px;
     top: 12px;
@@ -262,6 +304,12 @@ canvas {
   #touch-joystick .stick-handle {
     width: 50px;
     height: 50px;
+  }
+
+  #fullscreen-toggle {
+    bottom: calc(180px + env(safe-area-inset-bottom));
+    min-width: 40px;
+    min-height: 40px;
   }
 
   .action-btn {
