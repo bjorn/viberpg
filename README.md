@@ -14,6 +14,7 @@ docker compose up
 
 ```bash
 export MONGODB_URI="mongodb://localhost:27017"
+export PORT=3000
 cargo run
 ```
 

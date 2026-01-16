@@ -1,0 +1,31 @@
+services:
+  onlinerpg:
+    build: .
+    image: onlinerpg:latest
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      MONGODB_URI: "mongodb://mongo:27017"
+      VIRTUAL_HOST: "game.example.com"
+      LETSENCRYPT_HOST: "game.example.com"
+      LETSENCRYPT_EMAIL: "admin@example.com"
+    expose:
+      - "3000"
+    depends_on:
+      - mongo
+    networks:
+      - default
+      - nginx-proxy
+
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:
+
+networks:
+  nginx-proxy:
+    external: true

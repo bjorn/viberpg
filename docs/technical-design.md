@@ -37,3 +37,8 @@ The server loads JSON files from `data/` on startup:
 - `data/quests.json`: quest requirements and rewards.
 
 Adjusting these files changes behavior without code changes.
+
+## Deployment notes
+
+- `Dockerfile` builds a production-ready server image with the static assets and data files bundled.
+- `docker-compose.prod.yml` shows an example setup for MongoDB plus the server behind an nginx-proxy/ACME stack. Update `VIRTUAL_HOST`, `LETSENCRYPT_HOST`, and `LETSENCRYPT_EMAIL` to match your domain and mail.
