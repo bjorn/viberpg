@@ -8,6 +8,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use futures_util::{SinkExt, StreamExt};
 use mongodb::{bson::doc, options::ReplaceOptions, Client, Collection};
+use noise::{NoiseFn, Perlin};
 use rand::Rng;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
@@ -41,6 +42,7 @@ struct AppState {
     store: GameStore,
     data: Arc<GameData>,
     world: WorldConfig,
+    noise: Arc<WorldNoise>,
 }
 
 type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -53,6 +55,7 @@ async fn main() -> AppResult<()> {
 
     let world: WorldConfig = load_json("data/world.json")?;
     let data = Arc::new(load_game_data()?);
+    let noise = Arc::new(WorldNoise::new(world.seed));
     let mongo_uri = std::env::var("MONGODB_URI")
         .unwrap_or_else(|_| "mongodb://localhost:27017".to_string());
     let store = GameStore::new(&mongo_uri).await?;
@@ -63,6 +66,7 @@ async fn main() -> AppResult<()> {
         store,
         data,
         world: world.clone(),
+        noise,
     };
 
     spawn_game_loop(app_state.clone());
@@ -88,11 +92,11 @@ async fn session_handler(
     let (sid, jar, _is_new) = ensure_session_cookie(jar);
     let doc = app_state
         .store
-        .load_or_create_player(&sid, &app_state.world)
+        .load_or_create_player(&sid, &app_state.world, &app_state.noise)
         .await
         .unwrap_or_else(|err| {
             warn!("session load failed: {}", err);
-            default_player_doc(&sid, &app_state.world)
+            default_player_doc(&sid, &app_state.world, &app_state.noise)
         });
 
     let response = SessionResponse {
@@ -137,11 +141,11 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
 
     let doc = app_state
         .store
-        .load_or_create_player(&sid, &app_state.world)
+        .load_or_create_player(&sid, &app_state.world, &app_state.noise)
         .await
         .unwrap_or_else(|err| {
             warn!("player load failed: {}", err);
-            default_player_doc(&sid, &app_state.world)
+            default_player_doc(&sid, &app_state.world, &app_state.noise)
         });
 
     let welcome_msg = {
@@ -259,6 +263,7 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
                 app_state.world.seed,
                 coord,
                 &app_state.world,
+                &app_state.noise,
                 &app_state.data,
             );
             state.spawned_chunks.insert(coord);
@@ -269,11 +274,12 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
                 app_state.world.seed,
                 coord,
                 &app_state.world,
+                &app_state.noise,
                 &app_state.data,
             )
         });
 
-        let tiles = generate_tiles(app_state.world.seed, coord, &app_state.world);
+        let tiles = generate_tiles(coord, &app_state.world, &app_state.noise);
         let visible_resources = resources
             .iter()
             .filter(|res| res.hp > 0)
@@ -312,20 +318,28 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
         for id in player_ids {
             let input = state.inputs.get(&id).cloned().unwrap_or_default();
             if let Some(mut player) = state.players.remove(&id) {
-                update_player_movement(&mut player, input, app_state.world.seed, dt);
+                update_player_movement(&mut player, input, &app_state.world, &app_state.noise, dt);
                 handle_player_actions(
                     &mut player,
                     input,
                     now_ms,
                     &mut state,
                     &app_state.world,
+                    &app_state.noise,
                     &app_state.data,
                 );
                 state.players.insert(id, player);
             }
         }
 
-        update_monsters(&mut state, now_ms, dt, &app_state.world, &app_state.data);
+        update_monsters(
+            &mut state,
+            now_ms,
+            dt,
+            &app_state.world,
+            &app_state.noise,
+            &app_state.data,
+        );
         update_projectiles(&mut state, now_ms, dt, &app_state.data);
         update_resources(&mut state, now_ms, &app_state.data);
 
@@ -361,7 +375,13 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
     Ok(())
 }
 
-fn update_player_movement(player: &mut Player, input: InputState, seed: u64, dt: f32) {
+fn update_player_movement(
+    player: &mut Player,
+    input: InputState,
+    world: &WorldConfig,
+    noise: &WorldNoise,
+    dt: f32,
+) {
     let mut dx = input.dir_x;
     let mut dy = input.dir_y;
     let len = (dx * dx + dy * dy).sqrt();
@@ -375,10 +395,10 @@ fn update_player_movement(player: &mut Player, input: InputState, seed: u64, dt:
     let next_x = player.x + dx * PLAYER_SPEED * dt;
     let next_y = player.y + dy * PLAYER_SPEED * dt;
 
-    if can_walk(seed, next_x, player.y) {
+    if can_walk(world, noise, next_x, player.y) {
         player.x = next_x;
     }
-    if can_walk(seed, player.x, next_y) {
+    if can_walk(world, noise, player.x, next_y) {
         player.y = next_y;
     }
 }
@@ -389,6 +409,7 @@ fn handle_player_actions(
     now_ms: i64,
     state: &mut GameState,
     world: &WorldConfig,
+    noise: &WorldNoise,
     data: &GameData,
 ) {
     if input.gather && now_ms - player.last_gather_ms >= 400 {
@@ -462,7 +483,7 @@ fn handle_player_actions(
 
     if player.hp <= 0 {
         player.hp = MAX_HP;
-        let (spawn_x, spawn_y) = safe_spawn(world);
+        let (spawn_x, spawn_y) = safe_spawn(world, noise);
         player.x = spawn_x;
         player.y = spawn_y;
         send_system_message(state, &player.id, "You wake up by the campfire.".to_string());
@@ -474,6 +495,7 @@ fn update_monsters(
     now_ms: i64,
     dt: f32,
     world: &WorldConfig,
+    noise: &WorldNoise,
     data: &GameData,
 ) {
     let player_positions: Vec<(String, f32, f32)> = state
@@ -506,7 +528,7 @@ fn update_monsters(
                     .find(|(id, _, _)| id == &target_id)
                     .map(|(_, x, y)| (*x, *y))
                     .unwrap_or((monster.x, monster.y));
-                move_towards(monster, tx, ty, def.speed, dt, world.seed);
+                move_towards(monster, tx, ty, def.speed, dt, world, noise);
 
                 if nearest_dist <= MONSTER_ATTACK_RANGE
                     && now_ms - monster.last_attack_ms >= 800
@@ -515,10 +537,10 @@ fn update_monsters(
                     monster.last_attack_ms = now_ms;
                 }
             } else {
-                wander(monster, now_ms, def.speed, dt, world.seed);
+                wander(monster, now_ms, def.speed, dt, world, noise);
             }
         } else {
-            wander(monster, now_ms, def.speed, dt, world.seed);
+            wander(monster, now_ms, def.speed, dt, world, noise);
         }
     }
 
@@ -918,7 +940,15 @@ fn consume_item(inventory: &mut HashMap<String, i32>, item_id: &str, count: i32)
     true
 }
 
-fn move_towards(monster: &mut Monster, tx: f32, ty: f32, speed: f32, dt: f32, seed: u64) {
+fn move_towards(
+    monster: &mut Monster,
+    tx: f32,
+    ty: f32,
+    speed: f32,
+    dt: f32,
+    world: &WorldConfig,
+    noise: &WorldNoise,
+) {
     let dx = tx - monster.x;
     let dy = ty - monster.y;
     let len = (dx * dx + dy * dy).sqrt();
@@ -927,16 +957,23 @@ fn move_towards(monster: &mut Monster, tx: f32, ty: f32, speed: f32, dt: f32, se
         let vy = dy / len * speed * dt;
         let next_x = monster.x + vx;
         let next_y = monster.y + vy;
-        if can_walk(seed, next_x, monster.y) {
+        if can_walk(world, noise, next_x, monster.y) {
             monster.x = next_x;
         }
-        if can_walk(seed, monster.x, next_y) {
+        if can_walk(world, noise, monster.x, next_y) {
             monster.y = next_y;
         }
     }
 }
 
-fn wander(monster: &mut Monster, now_ms: i64, speed: f32, dt: f32, seed: u64) {
+fn wander(
+    monster: &mut Monster,
+    now_ms: i64,
+    speed: f32,
+    dt: f32,
+    world: &WorldConfig,
+    noise: &WorldNoise,
+) {
     if now_ms >= monster.wander_until_ms {
         let mut rng = rand::thread_rng();
         let angle = rng.gen_range(0.0..std::f32::consts::TAU);
@@ -946,10 +983,10 @@ fn wander(monster: &mut Monster, now_ms: i64, speed: f32, dt: f32, seed: u64) {
     let (dx, dy) = monster.wander_dir;
     let next_x = monster.x + dx * speed * 0.4 * dt;
     let next_y = monster.y + dy * speed * 0.4 * dt;
-    if can_walk(seed, next_x, monster.y) {
+    if can_walk(world, noise, next_x, monster.y) {
         monster.x = next_x;
     }
-    if can_walk(seed, monster.x, next_y) {
+    if can_walk(world, noise, monster.x, next_y) {
         monster.y = next_y;
     }
 }
@@ -960,18 +997,18 @@ fn distance(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-fn can_walk(seed: u64, x: f32, y: f32) -> bool {
-    tile_at(seed, x.floor() as i32, y.floor() as i32) != TILE_WATER
+fn can_walk(_world: &WorldConfig, noise: &WorldNoise, x: f32, y: f32) -> bool {
+    tile_at(noise, x.floor() as i32, y.floor() as i32) != TILE_WATER
 }
 
-fn generate_tiles(seed: u64, coord: ChunkCoord, world: &WorldConfig) -> Vec<u8> {
+fn generate_tiles(coord: ChunkCoord, world: &WorldConfig, noise: &WorldNoise) -> Vec<u8> {
     let chunk_size = world.chunk_size;
     let mut tiles = Vec::with_capacity((chunk_size * chunk_size) as usize);
     for y in 0..chunk_size {
         for x in 0..chunk_size {
             let wx = coord.x * chunk_size + x;
             let wy = coord.y * chunk_size + y;
-            tiles.push(tile_at(seed, wx, wy));
+            tiles.push(tile_at(noise, wx, wy));
         }
     }
     tiles
@@ -981,6 +1018,7 @@ fn generate_resources(
     seed: u64,
     coord: ChunkCoord,
     world: &WorldConfig,
+    noise: &WorldNoise,
     data: &GameData,
 ) -> Vec<ResourceNode> {
     let chunk_size = world.chunk_size;
@@ -989,18 +1027,32 @@ fn generate_resources(
         for x in 0..chunk_size {
             let wx = coord.x * chunk_size + x;
             let wy = coord.y * chunk_size + y;
-            let tile = tile_at(seed, wx, wy);
-            if tile != TILE_GRASS {
+            let tile = tile_at(noise, wx, wy);
+            if tile == TILE_WATER {
                 continue;
             }
-            let noise = noise01(seed.wrapping_add(12345), wx, wy);
-            let kind = if noise < 0.04 {
-                Some("tree")
-            } else if noise < 0.06 {
-                Some("rock")
-            } else {
-                None
-            };
+            let elevation = noise.elevation(wx as f32, wy as f32);
+            let moisture = noise.moisture(wx as f32, wy as f32);
+            let tree_density = noise.tree_density(wx as f32, wy as f32);
+            let rock_density = noise.rock_density(wx as f32, wy as f32);
+
+            let mut kind = None;
+            if tile == TILE_GRASS || tile == TILE_DIRT {
+                let tree_score = tree_density + moisture * 0.25;
+                let tree_roll = noise_hash01(seed, wx, wy);
+                if tree_score > 0.25 && tree_roll < (tree_score * 0.45 + 0.1) {
+                    kind = Some("tree");
+                }
+            }
+
+            if kind.is_none() && tile != TILE_SAND {
+                let rock_score = rock_density + elevation * 0.2;
+                let rock_roll = noise_hash01(seed.wrapping_add(991), wx, wy);
+                if rock_score > 0.48 && rock_roll < (rock_score * 0.4 + 0.05) {
+                    kind = Some("rock");
+                }
+            }
+
             if let Some(kind) = kind {
                 if let Some(def) = data.resources.get(kind) {
                     let id = hash_u64(
@@ -1027,6 +1079,7 @@ fn spawn_monsters_for_chunk(
     seed: u64,
     coord: ChunkCoord,
     world: &WorldConfig,
+    noise: &WorldNoise,
     data: &GameData,
 ) {
     let chunk_size = world.chunk_size;
@@ -1038,7 +1091,7 @@ fn spawn_monsters_for_chunk(
         let ly = ((local_seed >> 8) % chunk_size as u64) as i32;
         let wx = coord.x * chunk_size + lx;
         let wy = coord.y * chunk_size + ly;
-        if tile_at(seed, wx, wy) == TILE_WATER {
+        if tile_at(noise, wx, wy) == TILE_WATER {
             continue;
         }
         let monster_id = state.next_id();
@@ -1063,22 +1116,34 @@ fn spawn_monsters_for_chunk(
     }
 }
 
-fn tile_at(seed: u64, x: i32, y: i32) -> u8 {
-    let n = noise01(seed, x, y);
-    if n < 0.08 {
+fn tile_at(noise: &WorldNoise, x: i32, y: i32) -> u8 {
+    let elevation = noise.elevation(x as f32, y as f32);
+    let moisture = noise.moisture(x as f32, y as f32);
+    let soil = noise.soil(x as f32, y as f32);
+    let river = noise.river(x as f32, y as f32).abs();
+
+    let water_level = -0.18;
+    let shore_level = -0.08;
+    let river_mask = river < 0.06 && elevation < 0.35;
+
+    if elevation < water_level || river_mask {
         TILE_WATER
-    } else if n < 0.14 {
+    } else if elevation < shore_level {
         TILE_SAND
-    } else if n < 0.18 {
+    } else if moisture < -0.55 && elevation < 0.4 {
+        TILE_SAND
+    } else if soil > 0.45 && moisture > -0.2 {
         TILE_DIRT
     } else {
         TILE_GRASS
     }
 }
 
-fn noise01(seed: u64, x: i32, y: i32) -> f32 {
-    let mut value = seed ^ (x as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ (y as u64).wrapping_mul(0xC2B2AE3D27D4EB4F);
-    value = hash_u64(value);
+fn noise_hash01(seed: u64, x: i32, y: i32) -> f32 {
+    let value = hash_u64(
+        seed ^ (x as u64).wrapping_mul(0x9E3779B97F4A7C15)
+            ^ (y as u64).wrapping_mul(0xC2B2AE3D27D4EB4F),
+    );
     (value % 10_000) as f32 / 10_000.0
 }
 
@@ -1135,12 +1200,12 @@ fn extract_session_id(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-fn default_player_doc(id: &str, world: &WorldConfig) -> PlayerDoc {
+fn default_player_doc(id: &str, world: &WorldConfig, noise: &WorldNoise) -> PlayerDoc {
     let mut inventory = HashMap::new();
     inventory.insert("basic_axe".to_string(), 1);
     inventory.insert("basic_pick".to_string(), 1);
     inventory.insert("rusty_sword".to_string(), 1);
-    let (spawn_x, spawn_y) = safe_spawn(world);
+    let (spawn_x, spawn_y) = safe_spawn(world, noise);
     PlayerDoc {
         id: id.to_string(),
         name: random_name(),
@@ -1164,10 +1229,10 @@ fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
-fn safe_spawn(world: &WorldConfig) -> (f32, f32) {
+fn safe_spawn(world: &WorldConfig, noise: &WorldNoise) -> (f32, f32) {
     let base_x = world.spawn_x.round() as i32;
     let base_y = world.spawn_y.round() as i32;
-    if tile_at(world.seed, base_x, base_y) != TILE_WATER {
+    if tile_at(noise, base_x, base_y) != TILE_WATER {
         return (world.spawn_x, world.spawn_y);
     }
 
@@ -1176,7 +1241,7 @@ fn safe_spawn(world: &WorldConfig) -> (f32, f32) {
             for dy in -radius..=radius {
                 let x = base_x + dx;
                 let y = base_y + dy;
-                if tile_at(world.seed, x, y) != TILE_WATER {
+                if tile_at(noise, x, y) != TILE_WATER {
                     return (x as f32 + 0.5, y as f32 + 0.5);
                 }
             }
@@ -1224,11 +1289,16 @@ impl GameStore {
         Ok(self.players.find_one(doc! { "_id": id }, None).await?)
     }
 
-    async fn load_or_create_player(&self, id: &str, world: &WorldConfig) -> AppResult<PlayerDoc> {
+    async fn load_or_create_player(
+        &self,
+        id: &str,
+        world: &WorldConfig,
+        noise: &WorldNoise,
+    ) -> AppResult<PlayerDoc> {
         if let Some(doc) = self.load_player(id).await? {
             Ok(doc)
         } else {
-            let doc = default_player_doc(id, world);
+            let doc = default_player_doc(id, world, noise);
             let _ = self.save_player(&doc).await;
             Ok(doc)
         }
@@ -1484,6 +1554,72 @@ struct WorldConfig {
     tile_size: i32,
     spawn_x: f32,
     spawn_y: f32,
+}
+
+struct WorldNoise {
+    elevation: Perlin,
+    moisture: Perlin,
+    soil: Perlin,
+    river: Perlin,
+    tree: Perlin,
+    rock: Perlin,
+}
+
+impl WorldNoise {
+    fn new(seed: u64) -> Self {
+        let base = seed as u32;
+        Self {
+            elevation: Perlin::new(base.wrapping_add(11)),
+            moisture: Perlin::new(base.wrapping_add(23)),
+            soil: Perlin::new(base.wrapping_add(37)),
+            river: Perlin::new(base.wrapping_add(41)),
+            tree: Perlin::new(base.wrapping_add(59)),
+            rock: Perlin::new(base.wrapping_add(71)),
+        }
+    }
+
+    fn elevation(&self, x: f32, y: f32) -> f32 {
+        self.fbm(&self.elevation, x, y, 0.008, 4)
+    }
+
+    fn moisture(&self, x: f32, y: f32) -> f32 {
+        self.fbm(&self.moisture, x, y, 0.01, 3)
+    }
+
+    fn soil(&self, x: f32, y: f32) -> f32 {
+        self.fbm(&self.soil, x, y, 0.02, 2)
+    }
+
+    fn river(&self, x: f32, y: f32) -> f32 {
+        self.fbm(&self.river, x, y, 0.02, 2).abs()
+    }
+
+    fn tree_density(&self, x: f32, y: f32) -> f32 {
+        self.fbm(&self.tree, x, y, 0.045, 3)
+    }
+
+    fn rock_density(&self, x: f32, y: f32) -> f32 {
+        self.fbm(&self.rock, x, y, 0.06, 2)
+    }
+
+    fn fbm(&self, perlin: &Perlin, x: f32, y: f32, base_freq: f64, octaves: i32) -> f32 {
+        let mut freq = base_freq;
+        let mut amp = 0.5;
+        let mut sum = 0.0;
+        let mut max = 0.0;
+        for _ in 0..octaves {
+            let value = perlin.get([x as f64 * freq, y as f64 * freq]) as f32;
+            sum += value * amp;
+            max += amp;
+            freq *= 2.0;
+            amp *= 0.5;
+        }
+        if max > 0.0 {
+            sum / max
+        } else {
+            sum
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
