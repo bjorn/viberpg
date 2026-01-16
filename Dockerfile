@@ -1,11 +1,7 @@
 FROM rust:1.83 AS builder
 WORKDIR /app
 
-# Build a dummy target first to cache dependencies in a separate layer.
 COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && printf "fn main() {}\n" > src/main.rs
-RUN cargo build --release
-
 COPY src ./src
 COPY data ./data
 COPY public ./public
