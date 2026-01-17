@@ -20,6 +20,10 @@
   let playerId = null;
   let playerState = null;
   let worldSeed = 0;
+  const PLAYER_ANCHOR = { x: 0.5, y: 0.9 };
+  const MONSTER_ANCHOR = { x: 0.5, y: 0.9 };
+  const NPC_ANCHOR = { x: 0.5, y: 0.9 };
+  const RESOURCE_ANCHOR = { x: 0.5, y: 1.0 };
 
   const app = new PIXI.Application();
   await app.init({
@@ -33,10 +37,11 @@
 
   const world = new PIXI.Container();
   const tileLayer = new PIXI.Container();
-  const resourceLayer = new PIXI.Container();
   const entityLayer = new PIXI.Container();
+  const overlayLayer = new PIXI.Container();
   const projectileLayer = new PIXI.Container();
-  world.addChild(tileLayer, resourceLayer, entityLayer, projectileLayer);
+  entityLayer.sortableChildren = true;
+  world.addChild(tileLayer, entityLayer, projectileLayer, overlayLayer);
   app.stage.addChild(world);
 
   const tileAssetUrls = [
@@ -101,6 +106,13 @@
   let joystickPointerId = null;
   let joystickCenter = { x: 0, y: 0 };
   let joystickMaxRadius = 0;
+
+  function worldToPixels(x, y, anchor) {
+    return {
+      x: (x + anchor.x) * tileSize,
+      y: (y + anchor.y) * tileSize,
+    };
+  }
 
   function addChat(text, className) {
     const line = document.createElement('div');
@@ -178,7 +190,7 @@
       text.anchor.set(0.5, 0.5);
       text.y = -4;
       container.addChild(bubble, text);
-      entityLayer.addChild(container);
+      overlayLayer.addChild(container);
       indicator = { container, text };
       typingIndicators.set(id, indicator);
     }
@@ -313,8 +325,9 @@
       pointerMoveState.dirY = 0;
       return;
     }
-    const playerScreenX = (playerEntity.x + 0.5) * tileSize + world.x;
-    const playerScreenY = (playerEntity.y + 0.9) * tileSize + world.y;
+    const playerPos = worldToPixels(playerEntity.x, playerEntity.y, PLAYER_ANCHOR);
+    const playerScreenX = playerPos.x + world.x;
+    const playerScreenY = playerPos.y + world.y;
     const dx = event.clientX - playerScreenX;
     const dy = event.clientY - playerScreenY;
     const distance = Math.hypot(dx, dy);
@@ -411,11 +424,13 @@
       const texture = textures[resource.kind] || textures.tree;
       sprite = new PIXI.Sprite(texture);
       sprite.anchor.set(0.5, 0.9);
-      resourceLayer.addChild(sprite);
+      entityLayer.addChild(sprite);
       resourceSprites.set(resource.id, sprite);
     }
-    sprite.x = (resource.x + 0.5) * tileSize;
-    sprite.y = (resource.y + 1.0) * tileSize;
+    const basePos = worldToPixels(resource.x, resource.y, RESOURCE_ANCHOR);
+    sprite.x = basePos.x;
+    sprite.y = basePos.y;
+    sprite.zIndex = basePos.y;
   }
 
   function removeResource(id) {
@@ -520,17 +535,20 @@
     if (npcSprites.has(npc.id)) return;
     const sprite = new PIXI.Sprite(textures.npc);
     sprite.anchor.set(0.5, 0.9);
-    sprite.x = (npc.x + 0.5) * tileSize;
-    sprite.y = (npc.y + 0.9) * tileSize;
+    const basePos = worldToPixels(npc.x, npc.y, NPC_ANCHOR);
+    sprite.x = basePos.x;
+    sprite.y = basePos.y;
     entityLayer.addChild(sprite);
+    sprite.zIndex = basePos.y;
     npcSprites.set(npc.id, sprite);
   }
 
   function updateCamera() {
     const playerEntity = playerEntities.get(playerId);
     if (!playerEntity) return;
-    const targetX = app.renderer.width / 2 - playerEntity.x * tileSize;
-    const targetY = app.renderer.height / 2 - playerEntity.y * tileSize;
+    const playerPos = worldToPixels(playerEntity.x, playerEntity.y, PLAYER_ANCHOR);
+    const targetX = app.renderer.width / 2 - playerPos.x;
+    const targetY = app.renderer.height / 2 - playerPos.y;
     world.x = Math.round(targetX);
     world.y = Math.round(targetY);
     updateChunkVisibility();
@@ -732,18 +750,24 @@
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
       applyPlayerFacing(entity);
-      entity.sprite.x = (entity.x + 0.5) * tileSize;
-      const baseY = (entity.y + 0.9) * tileSize;
+      const basePos = worldToPixels(entity.x, entity.y, PLAYER_ANCHOR);
+      entity.sprite.x = basePos.x;
+      const baseY = basePos.y;
       applyWalkAnimation(entity, now, baseY);
+      entity.sprite.zIndex = baseY;
     }
 
     for (const entity of monsterEntities.values()) {
       const t = alpha(entity.startTime);
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
-      entity.sprite.x = (entity.x + 0.5) * tileSize;
-      entity.sprite.y = (entity.y + 0.9) * tileSize;
+      const basePos = worldToPixels(entity.x, entity.y, MONSTER_ANCHOR);
+      entity.sprite.x = basePos.x;
+      entity.sprite.y = basePos.y;
+      entity.sprite.zIndex = basePos.y;
     }
+
+    entityLayer.sortChildren();
   }
 
   function connect() {

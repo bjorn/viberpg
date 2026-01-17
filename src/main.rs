@@ -28,6 +28,8 @@ const MONSTER_AGGRO_RANGE: f32 = 5.0;
 const MONSTER_ATTACK_RANGE: f32 = 0.8;
 const GATHER_RANGE: f32 = 1.1;
 const INTERACT_RANGE: f32 = 1.2;
+const ENTITY_FOOT_OFFSET_X: f32 = 0.5;
+const ENTITY_FOOT_OFFSET_Y: f32 = 0.9;
 const SAVE_INTERVAL_MS: i64 = 5_000;
 const MAX_HP: i32 = 10;
 const PLAYER_REGEN_INTERVAL_MS: i64 = 5_000;
@@ -1141,8 +1143,16 @@ fn distance(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
+fn entity_foot_tile(x: f32, y: f32) -> (i32, i32) {
+    (
+        (x + ENTITY_FOOT_OFFSET_X).floor() as i32,
+        (y + ENTITY_FOOT_OFFSET_Y).floor() as i32,
+    )
+}
+
 fn can_walk(_world: &WorldConfig, noise: &WorldNoise, x: f32, y: f32) -> bool {
-    tile_at(noise, x.floor() as i32, y.floor() as i32) != TILE_WATER
+    let (tile_x, tile_y) = entity_foot_tile(x, y);
+    tile_at(noise, tile_x, tile_y) != TILE_WATER
 }
 
 fn generate_tiles(coord: ChunkCoord, world: &WorldConfig, noise: &WorldNoise) -> Vec<u8> {
