@@ -9,7 +9,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use futures_util::{SinkExt, StreamExt};
 use mongodb::{bson::doc, options::ReplaceOptions, Client, Collection};
 use noise::{NoiseFn, Perlin};
-use rand::Rng;
+use rand::{seq::SliceRandom, Rng};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -1059,7 +1059,7 @@ fn handle_player_actions(
 
     if player.hp <= 0 {
         player.hp = MAX_HP;
-        let (spawn_x, spawn_y) = safe_spawn(world, noise);
+        let (spawn_x, spawn_y) = spawn_near_campfire(world, noise);
         player.x = spawn_x;
         player.y = spawn_y;
         send_system_message(state, &player.id, "You wake up by the campfire.".to_string());
@@ -1759,6 +1759,8 @@ fn generate_resources(
     structure_tiles: &HashMap<TileCoord, StructureTile>,
 ) -> Vec<ResourceNode> {
     let chunk_size = world.chunk_size;
+    let campfire_x = world.spawn_x.round() as i32;
+    let campfire_y = world.spawn_y.round() as i32;
     let mut resources = Vec::new();
     for y in 0..chunk_size {
         for x in 0..chunk_size {
@@ -1766,6 +1768,9 @@ fn generate_resources(
             let wy = coord.y * chunk_size + y;
             let tile = tile_at(noise, wx, wy);
             if tile == TILE_WATER {
+                continue;
+            }
+            if (wx == campfire_x && wy == campfire_y) || (wx == campfire_x + 1 && wy == campfire_y) {
                 continue;
             }
             if structure_tiles.contains_key(&TileCoord { x: wx, y: wy }) {
@@ -1794,10 +1799,10 @@ fn generate_resources(
                 }
             }
 
-            if kind.is_none() && (is_dirt || (is_grass && moisture < 0.35)) {
-                let tree_score = tree_density + moisture * 0.15;
+            if kind.is_none() && is_dirt {
+                let tree_score = tree_density + moisture * 0.2;
                 let tree_roll = noise_hash01(seed.wrapping_add(77), wx, wy);
-                if tree_score > 0.18 && tree_roll < (tree_score * 0.7 + 0.12) {
+                if tree_score > 0.2 && tree_roll < (tree_score * 0.65 + 0.12) {
                     kind = Some("pine_tree");
                 }
             }
@@ -1985,7 +1990,7 @@ fn default_player_doc(id: &str, world: &WorldConfig, noise: &WorldNoise) -> Play
     inventory.insert("basic_pick".to_string(), 1);
     inventory.insert("basic_shovel".to_string(), 1);
     inventory.insert("rusty_sword".to_string(), 1);
-    let (spawn_x, spawn_y) = safe_spawn(world, noise);
+    let (spawn_x, spawn_y) = spawn_near_campfire(world, noise);
     PlayerDoc {
         id: id.to_string(),
         name: random_name(),
@@ -2043,6 +2048,30 @@ fn safe_spawn(world: &WorldConfig, noise: &WorldNoise) -> (f32, f32) {
     }
 
     (world.spawn_x, world.spawn_y)
+}
+
+fn spawn_near_campfire(world: &WorldConfig, noise: &WorldNoise) -> (f32, f32) {
+    let base_x = world.spawn_x.round() as i32;
+    let base_y = world.spawn_y.round() as i32;
+    let mut offsets = Vec::new();
+    for dx in -2..=2 {
+        for dy in -2..=2 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            offsets.push((dx, dy));
+        }
+    }
+    let mut rng = rand::thread_rng();
+    offsets.shuffle(&mut rng);
+    for (dx, dy) in offsets {
+        let x = base_x + dx;
+        let y = base_y + dy;
+        if tile_at(noise, x, y) != TILE_WATER {
+            return tile_anchor_position(x, y);
+        }
+    }
+    safe_spawn(world, noise)
 }
 
 async fn send_to_player(state: &Arc<RwLock<GameState>>, player_id: &str, msg: ServerMessage) {

@@ -73,6 +73,8 @@
     'assets/entities/bridge-stone.svg',
     'assets/entities/path.svg',
     'assets/entities/road.svg',
+    'assets/entities/tent.svg',
+    'assets/entities/campfire.svg',
     'assets/entities/player.svg',
     'assets/entities/player-back.svg',
     'assets/entities/player-side.svg',
@@ -95,6 +97,7 @@
   const monsterEntities = new Map();
   const projectileSprites = new Map();
   const npcSprites = new Map();
+  const landmarkSprites = new Map();
   const typingIndicators = new Map();
 
   const loadedChunks = new Set();
@@ -949,6 +952,28 @@
     npcSprites.set(npc.id, { sprite, x: npc.x, y: npc.y });
   }
 
+  function addLandmark(id, textureKey, tileX, tileY, anchor = PLAYER_ANCHOR) {
+    if (landmarkSprites.has(id)) return;
+    const texture = textures[textureKey];
+    if (!texture) return;
+    const sprite = new PIXI.Sprite(texture);
+    sprite.anchor.set(anchor.x, anchor.y);
+    const basePos = tileToPixels(tileX, tileY, anchor);
+    sprite.x = basePos.x;
+    sprite.y = basePos.y;
+    sprite.zIndex = basePos.y;
+    entityLayer.addChild(sprite);
+    landmarkSprites.set(id, sprite);
+  }
+
+  function addCampfireAndTent(world) {
+    if (!world) return;
+    const baseX = Math.round(world.spawn_x);
+    const baseY = Math.round(world.spawn_y);
+    addLandmark('campfire', 'campfire', baseX, baseY, PLAYER_ANCHOR);
+    addLandmark('tent', 'tent', baseX + 1, baseY, PLAYER_ANCHOR);
+  }
+
   function updateCamera() {
     const playerEntity = playerEntities.get(playerId);
     if (!playerEntity) return;
@@ -1021,6 +1046,8 @@
     textures.bridge_stone = PIXI.Texture.from('assets/entities/bridge-stone.svg');
     textures.path = PIXI.Texture.from('assets/entities/path.svg');
     textures.road = PIXI.Texture.from('assets/entities/road.svg');
+    textures.tent = PIXI.Texture.from('assets/entities/tent.svg');
+    textures.campfire = PIXI.Texture.from('assets/entities/campfire.svg');
     textures.playerFront = PIXI.Texture.from('assets/entities/player.svg');
     textures.playerBack = PIXI.Texture.from('assets/entities/player-back.svg');
     textures.playerSide = PIXI.Texture.from('assets/entities/player-side.svg');
@@ -1267,6 +1294,7 @@
           chunkSize = msg.world.chunk_size;
           worldSeed = msg.world.seed;
           ensureTextures();
+          addCampfireAndTent(msg.world);
           refreshNameStyle();
           if (msg.inventory_items) {
             renderInventory(msg.inventory_items);
