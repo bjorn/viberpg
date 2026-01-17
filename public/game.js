@@ -68,11 +68,22 @@
     'assets/tiles/grass-flowers.svg',
   ];
   const entityAssetUrls = [
-    'assets/entities/tree.svg',
-    'assets/entities/tree-apple.svg',
-    'assets/entities/tree-pine.svg',
-    'assets/entities/palm.svg',
+    'assets/entities/tree-1.svg',
+    'assets/entities/tree-2.svg',
+    'assets/entities/tree-3.svg',
+    'assets/entities/tree-apple-1.svg',
+    'assets/entities/tree-apple-2.svg',
+    'assets/entities/tree-apple-3.svg',
+    'assets/entities/tree-pine-1.svg',
+    'assets/entities/tree-pine-2.svg',
+    'assets/entities/tree-pine-3.svg',
+    'assets/entities/palm-1.svg',
+    'assets/entities/palm-2.svg',
+    'assets/entities/palm-3.svg',
     'assets/entities/rock.svg',
+    'assets/entities/rock-small.svg',
+    'assets/entities/rock-medium.svg',
+    'assets/entities/rock-large.svg',
     'assets/entities/hut-wood.svg',
     'assets/entities/house-stone.svg',
     'assets/entities/bridge-wood.svg',
@@ -105,6 +116,27 @@
   const npcSprites = new Map();
   const landmarkSprites = new Map();
   const typingIndicators = new Map();
+  const treeKinds = new Set(['tree', 'apple_tree', 'pine_tree', 'palm_tree']);
+  function resourceTextureFor(kind, size = 1) {
+    const level = Math.max(1, Math.min(3, size || 1));
+    switch (kind) {
+      case 'tree':
+        return textures[`tree${level}`] || textures.tree1;
+      case 'apple_tree':
+        return textures[`apple_tree${level}`] || textures.apple_tree1;
+      case 'pine_tree':
+        return textures[`pine_tree${level}`] || textures.pine_tree1;
+      case 'palm_tree':
+        return textures[`palm_tree${level}`] || textures.palm_tree1;
+      case 'rock': {
+        if (level >= 3) return textures.rockLarge || textures.rock;
+        if (level === 2) return textures.rockMedium || textures.rock;
+        return textures.rockSmall || textures.rock;
+      }
+      default:
+        return textures[kind];
+    }
+  }
 
   const loadedChunks = new Set();
   const pendingChunks = new Set();
@@ -317,7 +349,7 @@
   function ensureBuildPreview(kind) {
     if (!kind || kind === 'demolish') return;
     ensureTextures();
-    const textureKey = kind.replace(/_(h|v)$/, '');
+    const textureKey = baseStructureKind(kind).replace(/_(h|v)$/, '');
     const texture = textures[textureKey];
     if (!texture) return;
     if (!buildPreviewSprite) {
@@ -332,9 +364,12 @@
     }
     const isGround = groundStructureKinds.has(kind) || kind.startsWith('bridge_');
     const isBridge = kind.startsWith('bridge_');
-    if (isGround) {
+    const footprint = structureFootprints.get(kind) || structureFootprints.get(baseStructureKind(kind));
+    if (isGround || footprint) {
       if (isBridge) {
         buildPreviewSprite.anchor.set(0.5, 0.5);
+      } else if (footprint) {
+        buildPreviewSprite.anchor.set(0, 0);
       } else {
         buildPreviewSprite.anchor.set(0, 0);
       }
@@ -358,17 +393,29 @@
     if (!buildPreviewSprite) return;
     const isGround = groundStructureKinds.has(buildMode) || buildMode.startsWith('bridge_');
     const isBridge = buildMode.startsWith('bridge_');
-    if (isGround) {
+    const footprint =
+      structureFootprints.get(buildMode) || structureFootprints.get(baseStructureKind(buildMode));
+    if (isGround || footprint) {
       if (isBridge) {
         buildPreviewSprite.x = (tile.x + 0.5) * tileSize;
         buildPreviewSprite.y = (tile.y + 0.5) * tileSize;
         buildPreviewSprite.rotation = 0;
+      } else if (footprint) {
+        buildPreviewSprite.x = tile.x * tileSize;
+        buildPreviewSprite.y = tile.y * tileSize;
+        buildPreviewSprite.rotation = 0;
+        buildPreviewSprite.width = tileSize * footprint.width;
+        buildPreviewSprite.height = tileSize * footprint.height;
       } else {
         buildPreviewSprite.x = tile.x * tileSize;
         buildPreviewSprite.y = tile.y * tileSize;
         buildPreviewSprite.rotation = 0;
       }
-      buildPreviewSprite.zIndex = tile.y * tileSize + 10;
+      if (footprint) {
+        buildPreviewSprite.zIndex = (tile.y + footprint.height) * tileSize + 10;
+      } else {
+        buildPreviewSprite.zIndex = tile.y * tileSize + 10;
+      }
     } else {
       const basePos = tileToPixels(tile.x, tile.y, PLAYER_ANCHOR);
       buildPreviewSprite.x = basePos.x;
@@ -730,30 +777,36 @@
     ensureTextures();
     const key = chunkKey(chunk.chunk_x, chunk.chunk_y);
     pendingChunks.delete(key);
-    if (!chunkTiles.has(key)) {
-      const container = createTilemapLayer();
-      const chunkX = chunk.chunk_x * chunkSize * tileSize;
-      const chunkY = chunk.chunk_y * chunkSize * tileSize;
-      container.x = chunkX;
-      container.y = chunkY;
-      const tiles = chunk.tiles;
-      const useTilemap = typeof container.tile === 'function';
-      for (let y = 0; y < chunkSize; y += 1) {
-        for (let x = 0; x < chunkSize; x += 1) {
-          const tileId = tiles[y * chunkSize + x];
-          const texture = textures.tiles[tileId] || textures.tiles[0];
-          const px = x * tileSize;
-          const py = y * tileSize;
-          if (useTilemap) {
-            container.tile(texture, px, py);
-          } else {
-            const sprite = new PIXI.Sprite(texture);
-            sprite.x = px;
-            sprite.y = py;
-            container.addChild(sprite);
-          }
+    const existing = chunkTiles.get(key);
+    const container = existing?.container || createTilemapLayer();
+    if (typeof container.clear === 'function') {
+      container.clear();
+    } else if (typeof container.removeChildren === 'function') {
+      container.removeChildren();
+    }
+    const chunkX = chunk.chunk_x * chunkSize * tileSize;
+    const chunkY = chunk.chunk_y * chunkSize * tileSize;
+    container.x = chunkX;
+    container.y = chunkY;
+    const tiles = chunk.tiles;
+    const useTilemap = typeof container.tile === 'function';
+    for (let y = 0; y < chunkSize; y += 1) {
+      for (let x = 0; x < chunkSize; x += 1) {
+        const tileId = tiles[y * chunkSize + x];
+        const texture = textures.tiles[tileId] || textures.tiles[0];
+        const px = x * tileSize;
+        const py = y * tileSize;
+        if (useTilemap) {
+          container.tile(texture, px, py);
+        } else {
+          const sprite = new PIXI.Sprite(texture);
+          sprite.x = px;
+          sprite.y = py;
+          container.addChild(sprite);
         }
       }
+    }
+    if (!existing) {
       tileLayer.addChild(container);
       chunkTiles.set(key, {
         container,
@@ -764,7 +817,6 @@
           height: chunkSize * tileSize,
         },
       });
-      updateChunkVisibility();
     }
     loadedChunks.add(key);
     chunk.resources.forEach((res) => upsertResource(res));
@@ -778,15 +830,20 @@
     }
     let entry = resourceSprites.get(resource.id);
     if (!entry) {
-      const texture = textures[resource.kind] || textures.tree;
+      const texture = resourceTextureFor(resource.kind, resource.size);
       const sprite = new PIXI.Sprite(texture);
-      sprite.anchor.set(0.5, 0.9);
+      sprite.anchor.set(0.5, 1);
       entityLayer.addChild(sprite);
       entry = { sprite, x: resource.x, y: resource.y };
       resourceSprites.set(resource.id, entry);
     }
     entry.x = resource.x;
     entry.y = resource.y;
+    const texture = resourceTextureFor(resource.kind, resource.size);
+    if (texture && entry.sprite.texture !== texture) {
+      entry.sprite.texture = texture;
+    }
+    entry.sprite.scale.set(1, 1);
     const basePos = tileToPixels(resource.x, resource.y, RESOURCE_ANCHOR);
     entry.sprite.x = basePos.x;
     entry.sprite.y = basePos.y;
@@ -813,7 +870,25 @@
     'bridge_stone',
     'bridge_stone_h',
     'bridge_stone_v',
+    'hut_wood_root',
+    'house_stone_root',
   ]);
+  const renderlessStructureKinds = new Set([
+    'hut_wood_fill',
+    'house_stone_fill',
+    'hut_wood_block',
+    'hut_wood_top',
+    'house_stone_block',
+    'house_stone_top',
+  ]);
+  const structureFootprints = new Map([
+    ['hut_wood_root', { width: 2, height: 2 }],
+    ['house_stone_root', { width: 3, height: 3 }],
+  ]);
+
+  function baseStructureKind(kind) {
+    return kind.replace(/_(root|block|top|fill)$/, '');
+  }
 
   function structureKey(structure) {
     return `${structure.id}:${structure.x}:${structure.y}`;
@@ -821,17 +896,25 @@
 
   function upsertStructure(structure) {
     const key = structureKey(structure);
+    if (renderlessStructureKinds.has(structure.kind)) {
+      return;
+    }
+    const baseKind = baseStructureKind(structure.kind);
     let entry = structureSprites.get(key);
     if (!entry) {
-      const textureKey = structure.kind.replace(/_(h|v)$/, '');
+      const textureKey = baseKind.replace(/_(h|v)$/, '');
       const texture = textures[textureKey];
       if (!texture) return;
       const sprite = new PIXI.Sprite(texture);
-      const isGround = groundStructureKinds.has(structure.kind);
+      const isGround = groundStructureKinds.has(structure.kind) || groundStructureKinds.has(baseKind);
       const isBridge = structure.kind.startsWith('bridge_');
-      if (isGround) {
+      const footprint =
+        structureFootprints.get(structure.kind) || structureFootprints.get(baseKind);
+      if (isGround || footprint) {
         if (isBridge) {
           sprite.anchor.set(0.5, 0.5);
+        } else if (footprint) {
+          sprite.anchor.set(0, 0);
         } else {
           sprite.anchor.set(0, 0);
         }
@@ -843,17 +926,29 @@
       entry = { sprite, isGround, isBridge };
       structureSprites.set(key, entry);
     }
-    if (entry.isGround) {
+    const footprint =
+      structureFootprints.get(structure.kind) || structureFootprints.get(baseKind);
+    if (entry.isGround || footprint) {
       if (entry.isBridge) {
         entry.sprite.x = (structure.x + 0.5) * tileSize;
         entry.sprite.y = (structure.y + 0.5) * tileSize;
         entry.sprite.rotation = structure.kind.endsWith('_v') ? Math.PI / 2 : 0;
+      } else if (footprint) {
+        entry.sprite.x = structure.x * tileSize;
+        entry.sprite.y = structure.y * tileSize;
+        entry.sprite.rotation = 0;
+        entry.sprite.width = tileSize * footprint.width;
+        entry.sprite.height = tileSize * footprint.height;
       } else {
         entry.sprite.x = structure.x * tileSize;
         entry.sprite.y = structure.y * tileSize;
         entry.sprite.rotation = 0;
       }
-      entry.sprite.zIndex = structure.y * tileSize;
+      if (footprint) {
+        entry.sprite.zIndex = (structure.y + footprint.height) * tileSize;
+      } else {
+        entry.sprite.zIndex = structure.y * tileSize;
+      }
     } else {
       const basePos = tileToPixels(structure.x, structure.y, PLAYER_ANCHOR);
       entry.sprite.x = basePos.x;
@@ -864,6 +959,9 @@
 
   function removeStructure(structure) {
     const key = structureKey(structure);
+    if (renderlessStructureKinds.has(structure.kind)) {
+      return;
+    }
     const entry = structureSprites.get(key);
     if (!entry) return;
     if (entry.sprite.parent) {
@@ -1012,6 +1110,10 @@
     updateChunkVisibility();
   }
 
+  function chunkKey(x, y) {
+    return `${x},${y}`;
+  }
+
   function createTilemapLayer() {
     const TilemapConstructor =
       PIXI.tilemap?.CompositeTilemap ||
@@ -1036,6 +1138,7 @@
     atlasCanvas.width = tileSize * tileAssetUrls.length;
     atlasCanvas.height = tileSize;
     const ctx = atlasCanvas.getContext('2d');
+    if (!ctx) return {};
     tileAssetUrls.forEach((url, index) => {
       const texture = PIXI.Assets.get(url) || PIXI.Texture.from(url);
       const resource = texture.source?.resource || texture.baseTexture?.resource;
@@ -1062,11 +1165,22 @@
       tiles: buildTileAtlas(tileSize),
     };
 
-    textures.tree = PIXI.Texture.from('assets/entities/tree.svg');
-    textures.apple_tree = PIXI.Texture.from('assets/entities/tree-apple.svg');
-    textures.pine_tree = PIXI.Texture.from('assets/entities/tree-pine.svg');
-    textures.palm_tree = PIXI.Texture.from('assets/entities/palm.svg');
+    textures.tree1 = PIXI.Texture.from('assets/entities/tree-1.svg');
+    textures.tree2 = PIXI.Texture.from('assets/entities/tree-2.svg');
+    textures.tree3 = PIXI.Texture.from('assets/entities/tree-3.svg');
+    textures.apple_tree1 = PIXI.Texture.from('assets/entities/tree-apple-1.svg');
+    textures.apple_tree2 = PIXI.Texture.from('assets/entities/tree-apple-2.svg');
+    textures.apple_tree3 = PIXI.Texture.from('assets/entities/tree-apple-3.svg');
+    textures.pine_tree1 = PIXI.Texture.from('assets/entities/tree-pine-1.svg');
+    textures.pine_tree2 = PIXI.Texture.from('assets/entities/tree-pine-2.svg');
+    textures.pine_tree3 = PIXI.Texture.from('assets/entities/tree-pine-3.svg');
+    textures.palm_tree1 = PIXI.Texture.from('assets/entities/palm-1.svg');
+    textures.palm_tree2 = PIXI.Texture.from('assets/entities/palm-2.svg');
+    textures.palm_tree3 = PIXI.Texture.from('assets/entities/palm-3.svg');
     textures.rock = PIXI.Texture.from('assets/entities/rock.svg');
+    textures.rockSmall = PIXI.Texture.from('assets/entities/rock-small.svg');
+    textures.rockMedium = PIXI.Texture.from('assets/entities/rock-medium.svg');
+    textures.rockLarge = PIXI.Texture.from('assets/entities/rock-large.svg');
     textures.hut_wood = PIXI.Texture.from('assets/entities/hut-wood.svg');
     textures.house_stone = PIXI.Texture.from('assets/entities/house-stone.svg');
     textures.bridge_wood = PIXI.Texture.from('assets/entities/bridge-wood.svg');

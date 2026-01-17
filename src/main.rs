@@ -39,6 +39,9 @@ const CHUNK_KEEP_RADIUS: i32 = 3;
 const CHUNK_TTL_MS: i64 = 60_000;
 const MAX_NAME_CHARS: usize = 20;
 const PLAYER_COORD_VERSION: i32 = 1;
+const TREE_GROW_INTERVAL_MS: i64 = 30_000;
+const TREE_MAX_SIZE: i32 = 3;
+const ROCK_MAX_SIZE: i32 = 3;
 
 const TILE_GRASS: u8 = 0;
 const TILE_WATER: u8 = 1;
@@ -427,6 +430,7 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
         if !state.resources.contains_key(&coord) {
             let generated = generate_resources(
                 app_state.world.seed,
+                now_ms,
                 coord,
                 &app_state.world,
                 &app_state.noise,
@@ -472,6 +476,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     };
 
     let mut tiles = Vec::new();
+    let mut placements: Vec<(TileCoord, String)> = Vec::new();
     let mut cost = Vec::new();
     let mut require_shovel = false;
     let mut requires_land = true;
@@ -483,7 +488,26 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                 id: "wood".to_string(),
                 count: 20,
             });
-            tiles.push(TileCoord { x, y });
+            let width = 2;
+            let height = 2;
+            let base_y = y - (height - 1);
+            for dy in 0..height {
+                for dx in 0..width {
+                    let coord = TileCoord {
+                        x: x + dx,
+                        y: base_y + dy,
+                    };
+                    tiles.push(coord);
+                    let kind = if dy == height - 1 && dx == 0 {
+                        "hut_wood_root"
+                    } else if dy == height - 1 {
+                        "hut_wood_block"
+                    } else {
+                        "hut_wood_top"
+                    };
+                    placements.push((coord, kind.to_string()));
+                }
+            }
             "You build a wooden hut."
         }
         "house_stone" => {
@@ -491,7 +515,26 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                 id: "stone".to_string(),
                 count: 50,
             });
-            tiles.push(TileCoord { x, y });
+            let width = 3;
+            let height = 3;
+            let base_y = y - (height - 1);
+            for dy in 0..height {
+                for dx in 0..width {
+                    let coord = TileCoord {
+                        x: x + dx,
+                        y: base_y + dy,
+                    };
+                    tiles.push(coord);
+                    let kind = if dy == height - 1 && dx == 0 {
+                        "house_stone_root"
+                    } else if dy == height - 1 {
+                        "house_stone_block"
+                    } else {
+                        "house_stone_top"
+                    };
+                    placements.push((coord, kind.to_string()));
+                }
+            }
             "You build a stone house."
         }
         "bridge_wood" => {
@@ -534,7 +577,9 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         }
         "path" => {
             require_shovel = true;
-            tiles.push(TileCoord { x, y });
+            let coord = TileCoord { x, y };
+            tiles.push(coord);
+            placements.push((coord, "path".to_string()));
             "You lay down a path."
         }
         "road" => {
@@ -543,7 +588,9 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                 id: "stone".to_string(),
                 count: 2,
             });
-            tiles.push(TileCoord { x, y });
+            let coord = TileCoord { x, y };
+            tiles.push(coord);
+            placements.push((coord, "road".to_string()));
             "You build a road."
         }
         _ => {
@@ -621,6 +668,12 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         }
     }
 
+    if placements.is_empty() {
+        for tile in &tiles {
+            placements.push((TileCoord { x: tile.x, y: tile.y }, structure_kind.clone()));
+        }
+    }
+
     let mut inventory_items = None;
     if !cost.is_empty() {
         let mut removal_failed = false;
@@ -650,10 +703,10 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
 
     let structure_id = state.next_structure_id();
     let mut new_tiles = Vec::new();
-    for tile in tiles {
+    for (tile, kind) in placements {
         let structure = StructureTile {
             id: structure_id,
-            kind: structure_kind.clone(),
+            kind,
             x: tile.x,
             y: tile.y,
             owner_id: player_id.clone(),
@@ -851,7 +904,6 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                     &mut player,
                     input,
                     &state.structure_tiles,
-                    &app_state.world,
                     &app_state.noise,
                     dt,
                 );
@@ -881,7 +933,6 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
             &mut state,
             now_ms,
             dt,
-            &app_state.world,
             &app_state.noise,
             &app_state.data,
         );
@@ -942,7 +993,6 @@ fn update_player_movement(
     player: &mut Player,
     input: InputState,
     structure_tiles: &HashMap<TileCoord, StructureTile>,
-    world: &WorldConfig,
     noise: &WorldNoise,
     dt: f32,
 ) {
@@ -959,10 +1009,10 @@ fn update_player_movement(
     let next_x = player.x + dx * PLAYER_SPEED * dt;
     let next_y = player.y + dy * PLAYER_SPEED * dt;
 
-    if can_walk(structure_tiles, world, noise, next_x, player.y) {
+    if can_walk(structure_tiles, noise, next_x, player.y) {
         player.x = next_x;
     }
-    if can_walk(structure_tiles, world, noise, player.x, next_y) {
+    if can_walk(structure_tiles, noise, player.x, next_y) {
         player.y = next_y;
     }
 }
@@ -997,14 +1047,19 @@ fn handle_player_actions(
             if let Some((resource, def)) = find_nearby_resource(player, state, data) {
                 did_gather = true;
                 let tool_power = best_tool_power(&player.inventory, data, &def.tool);
-                if let Some(power) = tool_power {
+                if let Some(mut power) = tool_power {
+                    if resource.kind == "rock" {
+                        power = (power as f32 / resource.size.max(1) as f32).ceil() as i32;
+                    }
                     resource.hp -= power;
                     if resource.hp <= 0 {
                         resource.hp = 0;
                         resource.respawn_at_ms = Some(now_ms + def.respawn_ms);
+                        let yield_multiplier = resource.size.max(1);
                         for drop in &def.drops {
-                            add_item(&mut player.inventory, &drop.id, drop.count);
-                            messages.push(format!("Collected {} x{}", drop.id, drop.count));
+                            let count = drop.count * yield_multiplier;
+                            add_item(&mut player.inventory, &drop.id, count);
+                            messages.push(format!("Collected {} x{}", drop.id, count));
                         }
                         resource_update = Some((
                             ResourceNodePublic::from(resource.clone()),
@@ -1070,7 +1125,6 @@ fn update_monsters(
     state: &mut GameState,
     now_ms: i64,
     dt: f32,
-    world: &WorldConfig,
     noise: &WorldNoise,
     data: &GameData,
 ) {
@@ -1105,7 +1159,15 @@ fn update_monsters(
                     .find(|(id, _, _)| id == &target_id)
                     .map(|(_, x, y)| (*x, *y))
                     .unwrap_or((monster.x, monster.y));
-                move_towards(monster, tx, ty, def.speed, dt, structure_tiles, world, noise);
+                move_towards(
+                    monster,
+                    tx,
+                    ty,
+                    def.speed,
+                    dt,
+                    structure_tiles,
+                    noise,
+                );
 
                 if nearest_dist <= MONSTER_ATTACK_RANGE
                     && now_ms - monster.last_attack_ms >= 800
@@ -1114,10 +1176,24 @@ fn update_monsters(
                     monster.last_attack_ms = now_ms;
                 }
             } else {
-                wander(monster, now_ms, def.speed, dt, structure_tiles, world, noise);
+                wander(
+                    monster,
+                    now_ms,
+                    def.speed,
+                    dt,
+                    structure_tiles,
+                    noise,
+                );
             }
         } else {
-            wander(monster, now_ms, def.speed, dt, structure_tiles, world, noise);
+            wander(
+                monster,
+                now_ms,
+                def.speed,
+                dt,
+                structure_tiles,
+                noise,
+            );
         }
     }
 
@@ -1181,6 +1257,7 @@ fn update_projectiles(state: &mut GameState, _now_ms: i64, dt: f32, data: &GameD
 
 fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData) {
     let mut respawned = Vec::new();
+    let mut grown = Vec::new();
     for resources in state.resources.values_mut() {
         for res in resources.iter_mut() {
             if res.hp <= 0 {
@@ -1196,9 +1273,46 @@ fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData) {
                             }
                             res.hp = def.hp;
                             res.respawn_at_ms = None;
+                            if is_tree_kind(&res.kind) {
+                                let (s, next) = tree_spawn_state(now_ms as u64, res.x, res.y, now_ms);
+                                res.size = s;
+                                res.next_growth_ms = next;
+                            } else if res.kind == "rock" {
+                                let size_roll = noise_hash01(now_ms as u64, res.x, res.y);
+                                if size_roll > 0.8 {
+                                    res.size = 3.min(ROCK_MAX_SIZE);
+                                } else if size_roll > 0.5 {
+                                    res.size = 2.min(ROCK_MAX_SIZE);
+                                } else {
+                                    res.size = 1;
+                                }
+                                res.next_growth_ms = None;
+                            } else {
+                                res.size = 1;
+                                res.next_growth_ms = None;
+                            }
                             respawned.push(ResourceNodePublic::from(res.clone()));
                         }
                     }
+                }
+            } else if is_tree_kind(&res.kind) {
+                if res.size < TREE_MAX_SIZE {
+                    if let Some(next_growth) = res.next_growth_ms {
+                        if now_ms >= next_growth {
+                            res.size += 1;
+                            res.next_growth_ms = if res.size < TREE_MAX_SIZE {
+                                let jitter = noise_hash01(now_ms as u64, res.x, res.y);
+                                let delay =
+                                    (TREE_GROW_INTERVAL_MS as f32 * (0.4 + jitter * 1.2)) as i64;
+                                Some(now_ms + delay)
+                            } else {
+                                None
+                            };
+                            grown.push(ResourceNodePublic::from(res.clone()));
+                        }
+                    }
+                } else {
+                    res.next_growth_ms = None;
                 }
             }
         }
@@ -1211,6 +1325,18 @@ fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData) {
                 ServerMessage::ResourceUpdate {
                     resource: res,
                     state: "spawned".to_string(),
+                },
+            );
+        }
+    }
+
+    if !grown.is_empty() {
+        for res in grown {
+            broadcast_message_inline(
+                state,
+                ServerMessage::ResourceUpdate {
+                    resource: res,
+                    state: "grown".to_string(),
                 },
             );
         }
@@ -1658,7 +1784,6 @@ fn move_towards(
     speed: f32,
     dt: f32,
     structure_tiles: &HashMap<TileCoord, StructureTile>,
-    world: &WorldConfig,
     noise: &WorldNoise,
 ) {
     let dx = tx - monster.x;
@@ -1669,10 +1794,10 @@ fn move_towards(
         let vy = dy / len * speed * dt;
         let next_x = monster.x + vx;
         let next_y = monster.y + vy;
-        if can_walk(structure_tiles, world, noise, next_x, monster.y) {
+        if can_walk(structure_tiles, noise, next_x, monster.y) {
             monster.x = next_x;
         }
-        if can_walk(structure_tiles, world, noise, monster.x, next_y) {
+        if can_walk(structure_tiles, noise, monster.x, next_y) {
             monster.y = next_y;
         }
     }
@@ -1684,7 +1809,6 @@ fn wander(
     speed: f32,
     dt: f32,
     structure_tiles: &HashMap<TileCoord, StructureTile>,
-    world: &WorldConfig,
     noise: &WorldNoise,
 ) {
     if now_ms >= monster.wander_until_ms {
@@ -1696,10 +1820,10 @@ fn wander(
     let (dx, dy) = monster.wander_dir;
     let next_x = monster.x + dx * speed * 0.4 * dt;
     let next_y = monster.y + dy * speed * 0.4 * dt;
-    if can_walk(structure_tiles, world, noise, next_x, monster.y) {
+    if can_walk(structure_tiles, noise, next_x, monster.y) {
         monster.x = next_x;
     }
-    if can_walk(structure_tiles, world, noise, monster.x, next_y) {
+    if can_walk(structure_tiles, noise, monster.x, next_y) {
         monster.y = next_y;
     }
 }
@@ -1718,16 +1842,20 @@ fn tile_anchor_position(x: i32, y: i32) -> (f32, f32) {
     (x as f32 + ENTITY_FOOT_OFFSET_X, y as f32 + ENTITY_FOOT_OFFSET_Y)
 }
 
+
 fn can_walk(
     structure_tiles: &HashMap<TileCoord, StructureTile>,
-    _world: &WorldConfig,
     noise: &WorldNoise,
     x: f32,
     y: f32,
 ) -> bool {
     let (tile_x, tile_y) = entity_foot_tile(x, y);
     if let Some(structure) = structure_tiles.get(&TileCoord { x: tile_x, y: tile_y }) {
-        if structure.kind == "hut_wood" || structure.kind == "house_stone" {
+        if matches!(
+            structure.kind.as_str(),
+            "hut_wood" | "hut_wood_root" | "hut_wood_block" | "house_stone" | "house_stone_root"
+                | "house_stone_block"
+        ) {
             return false;
         }
         if structure.kind.starts_with("bridge_") {
@@ -1750,8 +1878,32 @@ fn generate_tiles(coord: ChunkCoord, world: &WorldConfig, noise: &WorldNoise) ->
     tiles
 }
 
+fn is_tree_kind(kind: &str) -> bool {
+    matches!(kind, "tree" | "apple_tree" | "pine_tree" | "palm_tree")
+}
+
+fn tree_spawn_state(seed: u64, x: i32, y: i32, now_ms: i64) -> (i32, Option<i64>) {
+    let roll = noise_hash01(seed.wrapping_add(5555), x, y);
+    let size = if roll > 0.7 {
+        TREE_MAX_SIZE
+    } else if roll > 0.4 {
+        2
+    } else {
+        1
+    };
+    let next_growth_ms = if size < TREE_MAX_SIZE {
+        let jitter = noise_hash01(seed.wrapping_add(9999), x, y);
+        let delay = (TREE_GROW_INTERVAL_MS as f32 * (0.4 + jitter * 1.2)) as i64;
+        Some(now_ms + delay)
+    } else {
+        None
+    };
+    (size, next_growth_ms)
+}
+
 fn generate_resources(
     seed: u64,
+    now_ms: i64,
     coord: ChunkCoord,
     world: &WorldConfig,
     noise: &WorldNoise,
@@ -1829,6 +1981,20 @@ fn generate_resources(
                         seed ^ (wx as u64).wrapping_mul(0x9E3779B97F4A7C15)
                             ^ (wy as u64).wrapping_mul(0xC2B2AE3D27D4EB4F),
                     );
+                    let mut size = 1;
+                    let mut next_growth_ms = None;
+                    if is_tree_kind(kind) {
+                        let (s, next) = tree_spawn_state(seed, wx, wy, now_ms);
+                        size = s;
+                        next_growth_ms = next;
+                    } else if kind == "rock" {
+                        let size_roll = noise_hash01(seed.wrapping_add(2024), wx, wy);
+                        if size_roll > 0.8 {
+                            size = 3.min(ROCK_MAX_SIZE);
+                        } else if size_roll > 0.5 {
+                            size = 2.min(ROCK_MAX_SIZE);
+                        }
+                    }
                     resources.push(ResourceNode {
                         id,
                         kind: kind.to_string(),
@@ -1836,6 +2002,8 @@ fn generate_resources(
                         y: wy,
                         hp: def.hp,
                         respawn_at_ms: None,
+                        size,
+                        next_growth_ms,
                     });
                 }
             }
@@ -2360,6 +2528,8 @@ struct ResourceNode {
     y: i32,
     hp: i32,
     respawn_at_ms: Option<i64>,
+    size: i32,
+    next_growth_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -2671,6 +2841,7 @@ struct ResourceNodePublic {
     x: i32,
     y: i32,
     hp: i32,
+    size: i32,
 }
 
 impl From<ResourceNode> for ResourceNodePublic {
@@ -2681,6 +2852,7 @@ impl From<ResourceNode> for ResourceNodePublic {
             x: node.x,
             y: node.y,
             hp: node.hp,
+            size: node.size,
         }
     }
 }
@@ -2693,6 +2865,7 @@ impl From<&ResourceNode> for ResourceNodePublic {
             x: node.x,
             y: node.y,
             hp: node.hp,
+            size: node.size,
         }
     }
 }
