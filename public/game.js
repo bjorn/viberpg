@@ -7,6 +7,10 @@
   const inventoryList = document.getElementById('inventory-list');
   const buildStatus = document.getElementById('build-status');
   const buildButtons = Array.from(document.querySelectorAll('.build-btn'));
+  const panelButtons = Array.from(document.querySelectorAll('.panel-btn'));
+  const uiScaleDown = document.getElementById('ui-scale-down');
+  const uiScaleUp = document.getElementById('ui-scale-up');
+  const uiScaleValue = document.getElementById('ui-scale-value');
   const dialogEl = document.getElementById('dialog');
   const dialogTitle = document.getElementById('dialog-title');
   const dialogText = document.getElementById('dialog-text');
@@ -132,6 +136,10 @@
   let pendingName = null;
   let buildMode = null;
   let pendingDemolish = null;
+  let buildPreviewSprite = null;
+  let buildPreviewKind = null;
+  let lastPointerTile = null;
+  let uiScale = 1;
 
   function worldToPixels(x, y, anchor) {
     return {
@@ -273,11 +281,78 @@
     });
     if (!buildMode) {
       setBuildStatus('Select a build option.');
+      clearBuildPreview();
     } else if (buildMode === 'demolish') {
       setBuildStatus('Click a structure twice to remove it.');
+      clearBuildPreview();
     } else {
       setBuildStatus('Click the map to place.');
+      updateBuildPreview(lastPointerTile);
     }
+  }
+
+  function ensureBuildPreview(kind) {
+    if (!kind || kind === 'demolish') return;
+    ensureTextures();
+    const textureKey = kind.replace(/_(h|v)$/, '');
+    const texture = textures[textureKey];
+    if (!texture) return;
+    if (!buildPreviewSprite) {
+      buildPreviewSprite = new PIXI.Sprite(texture);
+      buildPreviewSprite.alpha = 0.45;
+      buildPreviewSprite.zIndex = 10_000;
+      overlayLayer.addChild(buildPreviewSprite);
+    }
+    if (buildPreviewKind !== kind) {
+      buildPreviewSprite.texture = texture;
+      buildPreviewKind = kind;
+    }
+    const isGround = groundStructureKinds.has(kind) || kind.startsWith('bridge_');
+    const isBridge = kind.startsWith('bridge_');
+    if (isGround) {
+      if (isBridge) {
+        buildPreviewSprite.anchor.set(0.5, 0.5);
+      } else {
+        buildPreviewSprite.anchor.set(0, 0);
+      }
+    } else {
+      buildPreviewSprite.anchor.set(0.5, 0.9);
+    }
+  }
+
+  function clearBuildPreview() {
+    if (buildPreviewSprite) {
+      buildPreviewSprite.visible = false;
+    }
+  }
+
+  function updateBuildPreview(tile) {
+    if (!tile || !buildMode || buildMode === 'demolish') {
+      clearBuildPreview();
+      return;
+    }
+    ensureBuildPreview(buildMode);
+    if (!buildPreviewSprite) return;
+    const isGround = groundStructureKinds.has(buildMode) || buildMode.startsWith('bridge_');
+    const isBridge = buildMode.startsWith('bridge_');
+    if (isGround) {
+      if (isBridge) {
+        buildPreviewSprite.x = (tile.x + 0.5) * tileSize;
+        buildPreviewSprite.y = (tile.y + 0.5) * tileSize;
+        buildPreviewSprite.rotation = 0;
+      } else {
+        buildPreviewSprite.x = tile.x * tileSize;
+        buildPreviewSprite.y = tile.y * tileSize;
+        buildPreviewSprite.rotation = 0;
+      }
+      buildPreviewSprite.zIndex = tile.y * tileSize + 10;
+    } else {
+      const basePos = worldToPixels(tile.x, tile.y, PLAYER_ANCHOR);
+      buildPreviewSprite.x = basePos.x;
+      buildPreviewSprite.y = basePos.y;
+      buildPreviewSprite.zIndex = basePos.y + 10;
+    }
+    buildPreviewSprite.visible = true;
   }
 
   function screenToTile(event) {
@@ -287,6 +362,12 @@
       x: Math.floor(worldX),
       y: Math.floor(worldY),
     };
+  }
+
+  function handlePointerPreview(event) {
+    if (!buildMode || buildMode === 'demolish') return;
+    lastPointerTile = screenToTile(event);
+    updateBuildPreview(lastPointerTile);
   }
 
   function handleBuildClick(event) {
@@ -320,6 +401,49 @@
     sendMessage({ type: 'build', kind: buildMode, x: tile.x, y: tile.y });
     setBuildStatus('Placement requested.');
     return true;
+  }
+
+  function setupPanelControls(panelId) {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    const state = { collapsed: false };
+    panelButtons
+      .filter((button) => button.dataset.panel === panelId)
+      .forEach((button) => {
+        button.addEventListener('click', () => {
+          const action = button.dataset.action;
+          if (action === 'toggle') {
+            state.collapsed = !state.collapsed;
+            panel.classList.toggle('collapsed', state.collapsed);
+            return;
+          }
+        });
+      });
+  }
+
+  function setUiScale(value) {
+    uiScale = Math.max(0.7, Math.min(1.3, value));
+    document.getElementById('hud')?.style.setProperty('--ui-scale', uiScale);
+    if (uiScaleValue) {
+      uiScaleValue.textContent = `${Math.round(uiScale * 100)}%`;
+    }
+    try {
+      localStorage.setItem('ui-scale', uiScale.toString());
+    } catch (err) {
+      console.warn('UI scale save failed', err);
+    }
+  }
+
+  if (uiScaleDown) {
+    uiScaleDown.addEventListener('click', () => {
+      setUiScale(+(uiScale - 0.1).toFixed(2));
+    });
+  }
+
+  if (uiScaleUp) {
+    uiScaleUp.addEventListener('click', () => {
+      setUiScale(+(uiScale + 0.1).toFixed(2));
+    });
   }
 
   function setLocalTyping(nextState) {
@@ -1414,6 +1538,21 @@
       lastStatusUpdate = now;
     }
   });
+
+  setupPanelControls('inventory');
+  setupPanelControls('chat');
+  let savedScale = 1;
+  try {
+    const raw = localStorage.getItem('ui-scale');
+    if (raw) {
+      savedScale = parseFloat(raw) || 1;
+    }
+  } catch (err) {
+    console.warn('UI scale load failed', err);
+  }
+  setUiScale(savedScale);
+  window.addEventListener('mousemove', handlePointerPreview);
+  app.view.addEventListener('mouseleave', clearBuildPreview);
 
   fetch('/api/session')
     .then((response) => {

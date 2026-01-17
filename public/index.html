@@ -9,25 +9,43 @@
 </head>
 <body>
   <div id="hud">
-    <div id="title">Mistwood Vale</div>
-    <div id="status">Connecting...</div>
-    <button id="fullscreen-toggle" class="panel" type="button" aria-pressed="false" aria-label="Enter fullscreen" title="Enter fullscreen">
-      <svg class="fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" />
-      </svg>
-    </button>
+    <div id="title" class="ui-scale origin-top-left">Mistwood Vale</div>
+    <div id="status" class="ui-scale origin-top-left">Connecting...</div>
+    <div id="ui-top-controls" class="ui-scale origin-top-right">
+      <div id="ui-scale-control" class="panel" aria-label="UI scale">
+        <button id="ui-scale-down" class="panel-btn ui-scale-btn" type="button" aria-label="Scale UI down" title="Scale UI down">-</button>
+        <span id="ui-scale-value" aria-live="polite">100%</span>
+        <button id="ui-scale-up" class="panel-btn ui-scale-btn" type="button" aria-label="Scale UI up" title="Scale UI up">+</button>
+      </div>
+      <button id="fullscreen-toggle" class="panel" type="button" aria-pressed="false" aria-label="Enter fullscreen" title="Enter fullscreen">
+        <svg class="fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" />
+        </svg>
+      </button>
+    </div>
 
-    <div id="dialog" class="panel hidden">
+    <div id="dialog" class="panel hidden ui-scale origin-bottom-left">
       <div id="dialog-title"></div>
       <div id="dialog-text"></div>
     </div>
 
-    <div id="inventory" class="panel">
-      <div class="panel-title">Inventory</div>
-      <div id="inventory-list"></div>
+    <div id="inventory" class="panel ui-scale origin-top-left">
+      <div class="panel-header">
+        <div class="panel-title">Inventory</div>
+        <div class="panel-controls">
+          <button class="panel-btn panel-toggle" data-panel="inventory" data-action="toggle" type="button" aria-label="Toggle inventory" title="Toggle inventory">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="square" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="inventory-list"></div>
+      </div>
     </div>
 
-    <div id="build-menu" class="panel">
+    <div id="build-menu" class="panel ui-scale origin-top-left">
       <div class="panel-title">Build</div>
       <div id="build-options">
         <button class="build-btn" data-build="hut_wood" type="button">Wood Hut (20 wood)</button>
@@ -41,24 +59,36 @@
       <div id="build-status">Select a build option.</div>
     </div>
 
-    <div id="chat" class="panel">
-      <div id="name-panel" class="field-row">
-        <input id="name-input" type="text" maxlength="20" placeholder="Name" autocomplete="nickname" aria-label="Player name" />
-        <button id="name-save" type="button" aria-label="Set name">Set</button>
+    <div id="chat" class="panel ui-scale origin-bottom-right">
+      <div class="panel-header">
+        <div class="panel-title">Chat</div>
+        <div class="panel-controls">
+          <button class="panel-btn panel-toggle" data-panel="chat" data-action="toggle" type="button" aria-label="Toggle chat" title="Toggle chat">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="square" />
+            </svg>
+          </button>
+        </div>
       </div>
-      <div id="chat-log"></div>
-      <div class="chat-input-wrap">
-        <input id="chat-input" type="text" maxlength="160" placeholder="Say something..." />
-        <span class="key-hint" aria-hidden="true">Enter</span>
+      <div class="panel-body">
+        <div id="name-panel" class="field-row">
+          <input id="name-input" type="text" maxlength="20" placeholder="Name" autocomplete="nickname" aria-label="Player name" />
+          <button id="name-save" type="button" aria-label="Set name">Set</button>
+        </div>
+        <div id="chat-log"></div>
+        <div class="chat-input-wrap">
+          <input id="chat-input" type="text" maxlength="160" placeholder="Say something..." />
+          <span class="key-hint" aria-hidden="true">Enter</span>
+        </div>
       </div>
     </div>
 
     <div id="touch-controls">
-      <div id="touch-joystick" class="touch-surface">
+      <div id="touch-joystick" class="touch-surface ui-scale origin-bottom-left">
         <div class="stick-base"></div>
         <div class="stick-handle"></div>
       </div>
-      <div id="touch-actions" class="touch-surface">
+      <div id="touch-actions" class="touch-surface ui-scale origin-bottom-left">
         <button class="action-btn" data-action="attack" type="button">
           <span class="action-shortcut">Space</span>
           <span class="action-label">Attack</span>

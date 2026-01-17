@@ -12,6 +12,19 @@
     ]
   },
   {
+    "id": "quest_shovel",
+    "npc_id": "npc_logger",
+    "name": "Trailblazer",
+    "description": "Bring 6 wood and 4 stone so Edda can craft a shovel.",
+    "requires": [
+      { "id": "wood", "count": 6 },
+      { "id": "stone", "count": 4 }
+    ],
+    "rewards": [
+      { "id": "basic_shovel", "count": 1 }
+    ]
+  },
+  {
     "id": "quest_hunter",
     "npc_id": "npc_hunter",
     "name": "Boar Legs",

@@ -1792,10 +1792,10 @@ fn generate_resources(
                 }
             }
 
-            if kind.is_none() && is_dirt {
-                let tree_score = tree_density + moisture * 0.2;
+            if kind.is_none() && (is_dirt || (is_grass && moisture < 0.35)) {
+                let tree_score = tree_density + moisture * 0.15;
                 let tree_roll = noise_hash01(seed.wrapping_add(77), wx, wy);
-                if tree_score > 0.22 && tree_roll < (tree_score * 0.5 + 0.08) {
+                if tree_score > 0.18 && tree_roll < (tree_score * 0.7 + 0.12) {
                     kind = Some("pine_tree");
                 }
             }

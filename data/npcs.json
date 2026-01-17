@@ -4,13 +4,13 @@
     "name": "Edda the Logger",
     "x": 10.0,
     "y": 10.0,
-    "dialog": "A sturdy axe makes all the difference."
+    "dialog": "Trails keep us moving. Bring wood and stone, and I'll craft a shovel."
   },
   {
     "id": "npc_hunter",
     "name": "Bram the Hunter",
     "x": 15.0,
     "y": 6.0,
-    "dialog": "Slimes love damp shade. Bring me their cores."
+    "dialog": "Wild boar roam the thickets. Bring me their legs."
   }
 ]
