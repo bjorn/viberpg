@@ -52,14 +52,6 @@ canvas {
   color: var(--text-muted);
 }
 
-#help {
-  position: absolute;
-  top: 82px;
-  left: 20px;
-  font-size: 18px;
-  color: var(--accent-2);
-}
-
 #fullscreen-toggle {
   position: absolute;
   top: 20px;
@@ -160,11 +152,38 @@ canvas {
   outline: none;
 }
 
+.chat-input-wrap {
+  position: relative;
+}
+
+.chat-input-wrap #chat-input {
+  padding-right: 74px;
+}
+
+.chat-input-wrap .key-hint {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text);
+  opacity: 0.7;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
 #touch-controls {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  display: none;
+  display: block;
 }
 
 .touch-surface {
@@ -181,6 +200,7 @@ canvas {
   bottom: calc(16px + env(safe-area-inset-bottom));
   width: 140px;
   height: 140px;
+  display: none;
 }
 
 #touch-joystick .stick-base {
@@ -213,17 +233,18 @@ canvas {
 
 #touch-actions {
   position: absolute;
-  right: calc(16px + env(safe-area-inset-right));
+  left: calc(16px + env(safe-area-inset-left));
   bottom: calc(16px + env(safe-area-inset-bottom));
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: flex-end;
+  flex-direction: row;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .action-btn {
-  width: 108px;
-  height: 56px;
+  min-width: 108px;
+  height: 38px;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: rgba(10, 14, 20, 0.85);
@@ -237,6 +258,27 @@ canvas {
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
   touch-action: none;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  line-height: 1;
+  padding: 0 12px;
+}
+
+.action-shortcut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0.65;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  padding: 2px 6px;
+  min-width: 28px;
 }
 
 .action-btn[data-action="attack"] {
@@ -264,11 +306,24 @@ canvas {
 }
 
 @media (pointer: coarse) {
-  #touch-controls {
+  #touch-joystick {
     display: block;
   }
 
-  #help {
+  #touch-actions {
+    left: auto;
+    right: calc(16px + env(safe-area-inset-right));
+  }
+
+  .action-btn {
+    height: 56px;
+  }
+
+  .action-shortcut {
+    display: none;
+  }
+
+  .chat-input-wrap .key-hint {
     display: none;
   }
 
@@ -301,6 +356,11 @@ canvas {
     height: 120px;
   }
 
+  #touch-actions {
+    flex-direction: column;
+    align-items: flex-end;
+  }
+
   #touch-joystick .stick-handle {
     width: 50px;
     height: 50px;
@@ -313,20 +373,22 @@ canvas {
   }
 
   .action-btn {
-    width: 92px;
-    height: 50px;
+    min-width: 92px;
+    height: 56px;
     font-size: 18px;
+  }
+}
+
+@media (max-width: 760px) and (pointer: fine) {
+  #touch-actions {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 
 @media (max-width: 700px) {
   #title {
     font-size: 14px;
-  }
-
-  #help {
-    width: 240px;
-    font-size: 16px;
   }
 }
 

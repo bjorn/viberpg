@@ -913,10 +913,22 @@
     button.addEventListener('pointerleave', releaseAction);
   });
 
+  function normalizeArrowKey(event) {
+    if (event.code === 'ArrowUp' || event.key === 'ArrowUp' || event.key === 'Up') return 'ArrowUp';
+    if (event.code === 'ArrowDown' || event.key === 'ArrowDown' || event.key === 'Down') return 'ArrowDown';
+    if (event.code === 'ArrowLeft' || event.key === 'ArrowLeft' || event.key === 'Left') return 'ArrowLeft';
+    if (event.code === 'ArrowRight' || event.key === 'ArrowRight' || event.key === 'Right') return 'ArrowRight';
+    return null;
+  }
+
   window.addEventListener('keydown', (event) => {
     if (document.activeElement === chatInput) return;
     keys.add(event.code);
-    if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyF', 'KeyE'].includes(event.code)) {
+    const arrowKey = normalizeArrowKey(event);
+    if (arrowKey) {
+      keys.add(arrowKey);
+    }
+    if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight', 'Space', 'KeyF', 'KeyE'].includes(event.code) || arrowKey) {
       event.preventDefault();
     }
     if (event.code === 'Enter') {
@@ -927,6 +939,10 @@
   window.addEventListener('keyup', (event) => {
     if (document.activeElement === chatInput) return;
     keys.delete(event.code);
+    const arrowKey = normalizeArrowKey(event);
+    if (arrowKey) {
+      keys.delete(arrowKey);
+    }
   });
 
   chatInput.addEventListener('keydown', (event) => {
@@ -979,14 +995,16 @@
         ? touchState.dirX
         : usingPointerMove
           ? pointerMoveState.dirX
-          : (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+          : ((keys.has('KeyD') || keys.has('ArrowRight')) ? 1 : 0)
+            - ((keys.has('KeyA') || keys.has('ArrowLeft')) ? 1 : 0);
     const dirY = inputLocked
       ? 0
       : usingTouch
         ? touchState.dirY
         : usingPointerMove
           ? pointerMoveState.dirY
-          : (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
+          : ((keys.has('KeyS') || keys.has('ArrowDown')) ? 1 : 0)
+            - ((keys.has('KeyW') || keys.has('ArrowUp')) ? 1 : 0);
     const attack = !inputLocked && (keys.has('Space') || touchState.attack || touchState.attackPulse);
     const gather = !inputLocked && (keys.has('KeyF') || touchState.gather || touchState.gatherPulse);
     const interact = !inputLocked && (keys.has('KeyE') || touchState.interact || touchState.interactPulse);

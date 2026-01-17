@@ -11,7 +11,6 @@
   <div id="hud">
     <div id="title">Mistwood Vale</div>
     <div id="status">Connecting...</div>
-    <div id="help">WASD move · Space attack · F gather · E interact · Enter chat</div>
     <button id="fullscreen-toggle" class="panel" type="button" aria-pressed="false" aria-label="Enter fullscreen" title="Enter fullscreen">
       <svg class="fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" />
@@ -25,7 +24,10 @@
 
     <div id="chat" class="panel">
       <div id="chat-log"></div>
-      <input id="chat-input" type="text" maxlength="160" placeholder="Say something..." />
+      <div class="chat-input-wrap">
+        <input id="chat-input" type="text" maxlength="160" placeholder="Say something..." />
+        <span class="key-hint" aria-hidden="true">Enter</span>
+      </div>
     </div>
 
     <div id="touch-controls">
@@ -34,9 +36,18 @@
         <div class="stick-handle"></div>
       </div>
       <div id="touch-actions" class="touch-surface">
-        <button class="action-btn" data-action="attack" type="button">Attack</button>
-        <button class="action-btn" data-action="gather" type="button">Gather</button>
-        <button class="action-btn" data-action="interact" type="button">Interact</button>
+        <button class="action-btn" data-action="attack" type="button">
+          <span class="action-shortcut">Space</span>
+          <span class="action-label">Attack</span>
+        </button>
+        <button class="action-btn" data-action="gather" type="button">
+          <span class="action-shortcut">F</span>
+          <span class="action-label">Gather</span>
+        </button>
+        <button class="action-btn" data-action="interact" type="button">
+          <span class="action-shortcut">E</span>
+          <span class="action-label">Interact</span>
+        </button>
       </div>
     </div>
   </div>
