@@ -49,7 +49,11 @@
     'assets/entities/tree.svg',
     'assets/entities/rock.svg',
     'assets/entities/player.svg',
+    'assets/entities/player-back.svg',
+    'assets/entities/player-side.svg',
     'assets/entities/player-alt.svg',
+    'assets/entities/player-alt-back.svg',
+    'assets/entities/player-alt-side.svg',
     'assets/entities/npc.svg',
     'assets/entities/slime.svg',
     'assets/entities/arrow.svg',
@@ -432,11 +436,15 @@
       seen.add(player.id);
       let entity = playerEntities.get(player.id);
       if (!entity) {
-        const texture = player.id === playerId ? textures.player : textures.playerAlt;
+        const isAlt = player.id !== playerId;
+        const texture = isAlt ? textures.playerAltFront : textures.playerFront;
         const sprite = new PIXI.Sprite(texture);
         sprite.anchor.set(0.5, 0.9);
         entityLayer.addChild(sprite);
-        entity = createEntityState(sprite, player.x, player.y, now);
+        entity = createEntityState(sprite, player.x, player.y, now, {
+          facing: 'down',
+          isAlt,
+        });
         playerEntities.set(player.id, entity);
       } else {
         updateEntityTarget(entity, player.x, player.y, now);
@@ -580,8 +588,12 @@
 
     textures.tree = PIXI.Texture.from('assets/entities/tree.svg');
     textures.rock = PIXI.Texture.from('assets/entities/rock.svg');
-    textures.player = PIXI.Texture.from('assets/entities/player.svg');
-    textures.playerAlt = PIXI.Texture.from('assets/entities/player-alt.svg');
+    textures.playerFront = PIXI.Texture.from('assets/entities/player.svg');
+    textures.playerBack = PIXI.Texture.from('assets/entities/player-back.svg');
+    textures.playerSide = PIXI.Texture.from('assets/entities/player-side.svg');
+    textures.playerAltFront = PIXI.Texture.from('assets/entities/player-alt.svg');
+    textures.playerAltBack = PIXI.Texture.from('assets/entities/player-alt-back.svg');
+    textures.playerAltSide = PIXI.Texture.from('assets/entities/player-alt-side.svg');
     textures.npc = PIXI.Texture.from('assets/entities/npc.svg');
     textures.slime = PIXI.Texture.from('assets/entities/slime.svg');
     textures.arrow = PIXI.Texture.from('assets/entities/arrow.svg');
@@ -612,7 +624,7 @@
     ws.send(JSON.stringify(payload));
   }
 
-  function createEntityState(sprite, x, y, now) {
+  function createEntityState(sprite, x, y, now, options = {}) {
     return {
       sprite,
       x,
@@ -623,11 +635,18 @@
       targetY: y,
       startTime: now,
       hp: null,
+      facing: options.facing ?? 'down',
+      isAlt: options.isAlt ?? false,
       walkOffset: Math.random() * Math.PI * 2,
     };
   }
 
   function updateEntityTarget(entity, x, y, now) {
+    const dx = x - entity.x;
+    const dy = y - entity.y;
+    if (dx !== 0 || dy !== 0) {
+      entity.facing = getFacingFromDelta(dx, dy, entity.facing);
+    }
     entity.startX = entity.x;
     entity.startY = entity.y;
     entity.targetX = x;
@@ -646,9 +665,46 @@
     return a + (b - a) * t;
   }
 
+  function getFacingFromDelta(dx, dy, fallbackFacing) {
+    if (dx === 0 && dy === 0) {
+      return fallbackFacing;
+    }
+    if (Math.abs(dx) > Math.abs(dy)) {
+      return dx > 0 ? 'right' : 'left';
+    }
+    return dy > 0 ? 'down' : 'up';
+  }
+
+  function getPlayerTexture(entity) {
+    const prefix = entity.isAlt ? 'playerAlt' : 'player';
+    switch (entity.facing) {
+      case 'up':
+        return textures[`${prefix}Back`];
+      case 'left':
+      case 'right':
+        return textures[`${prefix}Side`];
+      default:
+        return textures[`${prefix}Front`];
+    }
+  }
+
+  function applyPlayerFacing(entity) {
+    const texture = getPlayerTexture(entity);
+    if (entity.sprite.texture !== texture) {
+      entity.sprite.texture = texture;
+    }
+    const scaleX = Math.abs(entity.sprite.scale.x || 1);
+    if (entity.facing === 'left') {
+      entity.sprite.scale.x = -scaleX;
+    } else {
+      entity.sprite.scale.x = scaleX;
+    }
+  }
+
   function applyWalkAnimation(entity, now, baseY) {
     const moveDistance = Math.hypot(entity.targetX - entity.startX, entity.targetY - entity.startY);
     const sprite = entity.sprite;
+    const facingSign = entity.facing === 'left' ? -1 : 1;
     if (moveDistance > 0.01) {
       const phase = now / 70 + entity.walkOffset;
       const stride = Math.sin(phase);
@@ -656,13 +712,14 @@
       const bob = Math.abs(stride) * tileSize * 0.06;
       sprite.rotation = swing * 0.35;
       sprite.skew.x = swing * 0.1;
-      sprite.scale.x = 1 + stride * 0.04;
+      sprite.scale.x = facingSign * (1 + stride * 0.04);
       sprite.scale.y = 1 - stride * 0.03;
       sprite.y = baseY + bob;
     } else {
       sprite.rotation = 0;
       sprite.skew.x = 0;
-      sprite.scale.set(1);
+      sprite.scale.x = facingSign;
+      sprite.scale.y = 1;
       sprite.y = baseY;
     }
   }
@@ -674,6 +731,7 @@
       const t = alpha(entity.startTime);
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
+      applyPlayerFacing(entity);
       entity.sprite.x = (entity.x + 0.5) * tileSize;
       const baseY = (entity.y + 0.9) * tileSize;
       applyWalkAnimation(entity, now, baseY);
