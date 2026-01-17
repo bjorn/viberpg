@@ -664,10 +664,11 @@
     if (entity.sprite.texture !== texture) {
       entity.sprite.texture = texture;
     }
+    const scaleX = Math.abs(entity.sprite.scale.x || 1);
     if (entity.facing === 'left') {
-      entity.sprite.scale.x = -1;
+      entity.sprite.scale.x = -scaleX;
     } else {
-      entity.sprite.scale.x = 1;
+      entity.sprite.scale.x = scaleX;
     }
   }
 
