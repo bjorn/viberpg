@@ -30,8 +30,6 @@
   let playerState = null;
   let worldSeed = 0;
   const PLAYER_ANCHOR = { x: 0.5, y: 0.9 };
-  const MONSTER_ANCHOR = { x: 0.5, y: 0.9 };
-  const NPC_ANCHOR = { x: 0.5, y: 0.9 };
   const RESOURCE_ANCHOR = { x: 0.5, y: 1.0 };
 
   const app = new PIXI.Application();
@@ -141,7 +139,14 @@
   let lastPointerTile = null;
   let uiScale = 1;
 
-  function worldToPixels(x, y, anchor) {
+  function worldToPixels(x, y) {
+    return {
+      x: x * tileSize,
+      y: y * tileSize,
+    };
+  }
+
+  function tileToPixels(x, y, anchor) {
     return {
       x: (x + anchor.x) * tileSize,
       y: (y + anchor.y) * tileSize,
@@ -347,7 +352,7 @@
       }
       buildPreviewSprite.zIndex = tile.y * tileSize + 10;
     } else {
-      const basePos = worldToPixels(tile.x, tile.y, PLAYER_ANCHOR);
+      const basePos = tileToPixels(tile.x, tile.y, PLAYER_ANCHOR);
       buildPreviewSprite.x = basePos.x;
       buildPreviewSprite.y = basePos.y;
       buildPreviewSprite.zIndex = basePos.y + 10;
@@ -644,7 +649,7 @@
       pointerMoveState.dirY = 0;
       return;
     }
-    const playerPos = worldToPixels(playerEntity.x, playerEntity.y, PLAYER_ANCHOR);
+    const playerPos = worldToPixels(playerEntity.x, playerEntity.y);
     const playerScreenX = playerPos.x + world.x;
     const playerScreenY = playerPos.y + world.y;
     const dx = event.clientX - playerScreenX;
@@ -747,7 +752,7 @@
       entityLayer.addChild(sprite);
       resourceSprites.set(resource.id, sprite);
     }
-    const basePos = worldToPixels(resource.x, resource.y, RESOURCE_ANCHOR);
+    const basePos = tileToPixels(resource.x, resource.y, RESOURCE_ANCHOR);
     sprite.x = basePos.x;
     sprite.y = basePos.y;
     sprite.zIndex = basePos.y;
@@ -815,7 +820,7 @@
       }
       entry.sprite.zIndex = structure.y * tileSize;
     } else {
-      const basePos = worldToPixels(structure.x, structure.y, PLAYER_ANCHOR);
+      const basePos = tileToPixels(structure.x, structure.y, PLAYER_ANCHOR);
       entry.sprite.x = basePos.x;
       entry.sprite.y = basePos.y;
       entry.sprite.zIndex = basePos.y;
@@ -931,7 +936,7 @@
     if (npcSprites.has(npc.id)) return;
     const sprite = new PIXI.Sprite(textures.npc);
     sprite.anchor.set(0.5, 0.9);
-    const basePos = worldToPixels(npc.x, npc.y, NPC_ANCHOR);
+    const basePos = worldToPixels(npc.x, npc.y);
     sprite.x = basePos.x;
     sprite.y = basePos.y;
     entityLayer.addChild(sprite);
@@ -942,7 +947,7 @@
   function updateCamera() {
     const playerEntity = playerEntities.get(playerId);
     if (!playerEntity) return;
-    const playerPos = worldToPixels(playerEntity.x, playerEntity.y, PLAYER_ANCHOR);
+    const playerPos = worldToPixels(playerEntity.x, playerEntity.y);
     const targetX = app.renderer.width / 2 - playerPos.x;
     const targetY = app.renderer.height / 2 - playerPos.y;
     world.x = Math.round(targetX);
@@ -1168,7 +1173,7 @@
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
       applyPlayerFacing(entity);
-      const basePos = worldToPixels(entity.x, entity.y, PLAYER_ANCHOR);
+      const basePos = worldToPixels(entity.x, entity.y);
       entity.sprite.x = basePos.x;
       const baseY = basePos.y;
       applyWalkAnimation(entity, now, baseY);
@@ -1184,7 +1189,7 @@
       const t = alpha(entity.startTime);
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
-      const basePos = worldToPixels(entity.x, entity.y, MONSTER_ANCHOR);
+      const basePos = worldToPixels(entity.x, entity.y);
       entity.sprite.x = basePos.x;
       entity.sprite.y = basePos.y;
       entity.sprite.zIndex = basePos.y;

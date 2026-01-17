@@ -38,6 +38,7 @@ const TYPING_TIMEOUT_MS: i64 = 2500;
 const CHUNK_KEEP_RADIUS: i32 = 3;
 const CHUNK_TTL_MS: i64 = 60_000;
 const MAX_NAME_CHARS: usize = 20;
+const PLAYER_COORD_VERSION: i32 = 1;
 
 const TILE_GRASS: u8 = 0;
 const TILE_WATER: u8 = 1;
@@ -1710,10 +1711,11 @@ fn distance(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
 }
 
 fn entity_foot_tile(x: f32, y: f32) -> (i32, i32) {
-    (
-        (x + ENTITY_FOOT_OFFSET_X).floor() as i32,
-        (y + ENTITY_FOOT_OFFSET_Y).floor() as i32,
-    )
+    (x.floor() as i32, y.floor() as i32)
+}
+
+fn tile_anchor_position(x: i32, y: i32) -> (f32, f32) {
+    (x as f32 + ENTITY_FOOT_OFFSET_X, y as f32 + ENTITY_FOOT_OFFSET_Y)
 }
 
 fn can_walk(
@@ -1858,13 +1860,14 @@ fn spawn_monsters_for_chunk(
             continue;
         }
         let monster_id = state.next_id();
+        let (spawn_x, spawn_y) = tile_anchor_position(wx, wy);
         state.monsters.insert(
             monster_id,
             Monster {
                 id: monster_id,
                 kind: "boar".to_string(),
-                x: wx as f32 + 0.5,
-                y: wy as f32 + 0.5,
+                x: spawn_x,
+                y: spawn_y,
                 hp: data
                     .monsters
                     .get("boar")
@@ -1934,6 +1937,14 @@ fn load_game_data() -> AppResult<GameData> {
     let monsters: Vec<MonsterDef> = load_json("data/monsters.json")?;
     let quests: Vec<QuestDef> = load_json("data/quests.json")?;
     let npcs: Vec<NpcDef> = load_json("data/npcs.json")?;
+    let npcs = npcs
+        .into_iter()
+        .map(|mut npc| {
+            npc.x += ENTITY_FOOT_OFFSET_X;
+            npc.y += ENTITY_FOOT_OFFSET_Y;
+            npc
+        })
+        .collect();
 
     Ok(GameData::new(items, resources, monsters, quests, npcs))
 }
@@ -1983,6 +1994,7 @@ fn default_player_doc(id: &str, world: &WorldConfig, noise: &WorldNoise) -> Play
         hp: MAX_HP,
         inventory,
         completed_quests: Vec::new(),
+        coord_version: PLAYER_COORD_VERSION,
     }
 }
 
@@ -2015,7 +2027,7 @@ fn safe_spawn(world: &WorldConfig, noise: &WorldNoise) -> (f32, f32) {
     let base_x = world.spawn_x.round() as i32;
     let base_y = world.spawn_y.round() as i32;
     if tile_at(noise, base_x, base_y) != TILE_WATER {
-        return (world.spawn_x, world.spawn_y);
+        return tile_anchor_position(base_x, base_y);
     }
 
     for radius in 1..=8 {
@@ -2024,7 +2036,7 @@ fn safe_spawn(world: &WorldConfig, noise: &WorldNoise) -> (f32, f32) {
                 let x = base_x + dx;
                 let y = base_y + dy;
                 if tile_at(noise, x, y) != TILE_WATER {
-                    return (x as f32 + 0.5, y as f32 + 0.5);
+                    return tile_anchor_position(x, y);
                 }
             }
         }
@@ -2129,6 +2141,8 @@ struct PlayerDoc {
     hp: i32,
     inventory: HashMap<String, i32>,
     completed_quests: Vec<String>,
+    #[serde(default)]
+    coord_version: i32,
 }
 
 #[derive(Clone)]
@@ -2200,11 +2214,12 @@ struct Player {
 impl Player {
     fn from_doc(doc: PlayerDoc) -> Self {
         let inventory_hash = inventory_hash(&doc.inventory);
+        let (x, y) = player_position_from_doc(&doc);
         Self {
             id: doc.id,
             name: doc.name,
-            x: doc.x,
-            y: doc.y,
+            x,
+            y,
             hp: doc.hp,
             face_x: 1.0,
             face_y: 0.0,
@@ -2220,9 +2235,10 @@ impl Player {
     }
 
     fn sync_from_doc(&mut self, doc: &PlayerDoc) {
+        let (x, y) = player_position_from_doc(doc);
         self.name = doc.name.clone();
-        self.x = doc.x;
-        self.y = doc.y;
+        self.x = x;
+        self.y = y;
         self.hp = doc.hp;
         self.inventory = doc.inventory.clone();
         self.completed_quests = doc.completed_quests.iter().cloned().collect();
@@ -2238,6 +2254,7 @@ impl Player {
             hp: self.hp,
             inventory: self.inventory.clone(),
             completed_quests: self.completed_quests.iter().cloned().collect(),
+            coord_version: PLAYER_COORD_VERSION,
         }
     }
 
@@ -2250,6 +2267,14 @@ impl Player {
             hp: self.hp,
             inventory: self.inventory.clone(),
         }
+    }
+}
+
+fn player_position_from_doc(doc: &PlayerDoc) -> (f32, f32) {
+    if doc.coord_version >= PLAYER_COORD_VERSION {
+        (doc.x, doc.y)
+    } else {
+        (doc.x + ENTITY_FOOT_OFFSET_X, doc.y + ENTITY_FOOT_OFFSET_Y)
     }
 }
 
