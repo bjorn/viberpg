@@ -552,6 +552,11 @@ canvas {
   filter: brightness(1.12);
 }
 
+.action-btn.is-disabled {
+  opacity: 0.45;
+  filter: grayscale(0.2);
+}
+
 .hidden {
   display: none;
 }

@@ -122,6 +122,8 @@
   const MAX_CHAT_LINES = 60;
   const TYPING_IDLE_MS = 1800;
   const MAX_NAME_CHARS = 20;
+  const GATHER_RANGE = 1.1;
+  const INTERACT_RANGE = 1.2;
   let localTyping = false;
   let typingTimer = null;
   let lastTypingSent = 0;
@@ -744,27 +746,30 @@
       removeResource(resource.id);
       return;
     }
-    let sprite = resourceSprites.get(resource.id);
-    if (!sprite) {
+    let entry = resourceSprites.get(resource.id);
+    if (!entry) {
       const texture = textures[resource.kind] || textures.tree;
-      sprite = new PIXI.Sprite(texture);
+      const sprite = new PIXI.Sprite(texture);
       sprite.anchor.set(0.5, 0.9);
       entityLayer.addChild(sprite);
-      resourceSprites.set(resource.id, sprite);
+      entry = { sprite, x: resource.x, y: resource.y };
+      resourceSprites.set(resource.id, entry);
     }
+    entry.x = resource.x;
+    entry.y = resource.y;
     const basePos = tileToPixels(resource.x, resource.y, RESOURCE_ANCHOR);
-    sprite.x = basePos.x;
-    sprite.y = basePos.y;
-    sprite.zIndex = basePos.y;
+    entry.sprite.x = basePos.x;
+    entry.sprite.y = basePos.y;
+    entry.sprite.zIndex = basePos.y;
   }
 
   function removeResource(id) {
-    const sprite = resourceSprites.get(id);
-    if (sprite) {
-      if (sprite.parent) {
-        sprite.parent.removeChild(sprite);
+    const entry = resourceSprites.get(id);
+    if (entry) {
+      if (entry.sprite.parent) {
+        entry.sprite.parent.removeChild(entry.sprite);
       }
-      sprite.destroy();
+      entry.sprite.destroy();
       resourceSprites.delete(id);
     }
   }
@@ -941,7 +946,7 @@
     sprite.y = basePos.y;
     entityLayer.addChild(sprite);
     sprite.zIndex = basePos.y;
-    npcSprites.set(npc.id, sprite);
+    npcSprites.set(npc.id, { sprite, x: npc.x, y: npc.y });
   }
 
   function updateCamera() {
@@ -1163,6 +1168,47 @@
       sprite.scale.y = 1;
       sprite.y = baseY;
     }
+  }
+
+  function setActionAvailability(action, available) {
+    const button = actionButtonsByAction.get(action);
+    if (!button) return;
+    button.classList.toggle('is-disabled', !available);
+    button.setAttribute('aria-disabled', String(!available));
+  }
+
+  function updateActionAvailability() {
+    const playerEntity = playerEntities.get(playerId);
+    if (!playerEntity) {
+      setActionAvailability('gather', false);
+      setActionAvailability('interact', false);
+      return;
+    }
+    const px = playerEntity.x;
+    const py = playerEntity.y;
+
+    let canGather = false;
+    for (const entry of resourceSprites.values()) {
+      const dx = entry.x + 0.5 - px;
+      const dy = entry.y + 0.5 - py;
+      if (Math.hypot(dx, dy) <= GATHER_RANGE) {
+        canGather = true;
+        break;
+      }
+    }
+
+    let canInteract = false;
+    for (const entry of npcSprites.values()) {
+      const dx = entry.x - px;
+      const dy = entry.y - py;
+      if (Math.hypot(dx, dy) <= INTERACT_RANGE) {
+        canInteract = true;
+        break;
+      }
+    }
+
+    setActionAvailability('gather', canGather);
+    setActionAvailability('interact', canInteract);
   }
 
   function updateEntities(now) {
@@ -1532,6 +1578,7 @@
   app.ticker.add(() => {
     const now = performance.now();
     updateEntities(now);
+    updateActionAvailability();
     updateTypingIndicators(now);
     updateCamera();
     if (now - lastStatusUpdate > 200 && playerId) {
