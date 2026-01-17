@@ -595,6 +595,7 @@
       targetY: y,
       startTime: now,
       hp: null,
+      walkOffset: Math.random() * Math.PI * 2,
     };
   }
 
@@ -617,6 +618,27 @@
     return a + (b - a) * t;
   }
 
+  function applyWalkAnimation(entity, now, baseY) {
+    const moveDistance = Math.hypot(entity.targetX - entity.startX, entity.targetY - entity.startY);
+    const sprite = entity.sprite;
+    if (moveDistance > 0.01) {
+      const phase = now / 140 + entity.walkOffset;
+      const stride = Math.sin(phase);
+      const swing = stride * 0.18;
+      const bob = Math.abs(stride) * tileSize * 0.06;
+      sprite.rotation = swing * 0.35;
+      sprite.skew.x = swing * 0.1;
+      sprite.scale.x = 1 + stride * 0.04;
+      sprite.scale.y = 1 - stride * 0.03;
+      sprite.y = baseY + bob;
+    } else {
+      sprite.rotation = 0;
+      sprite.skew.x = 0;
+      sprite.scale.set(1);
+      sprite.y = baseY;
+    }
+  }
+
   function updateEntities(now) {
     const alpha = (startTime) => Math.min(1, (now - startTime) / INTERP_MS);
 
@@ -625,7 +647,8 @@
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
       entity.sprite.x = (entity.x + 0.5) * tileSize;
-      entity.sprite.y = (entity.y + 0.9) * tileSize;
+      const baseY = (entity.y + 0.9) * tileSize;
+      applyWalkAnimation(entity, now, baseY);
     }
 
     for (const entity of monsterEntities.values()) {
