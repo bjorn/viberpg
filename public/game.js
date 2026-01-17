@@ -5,6 +5,9 @@
   const nameInput = document.getElementById('name-input');
   const nameSave = document.getElementById('name-save');
   const inventoryList = document.getElementById('inventory-list');
+  const inventoryPanel = document.getElementById('inventory');
+  const buildMenu = document.getElementById('build-menu');
+  const hudEl = document.getElementById('hud');
   const buildStatus = document.getElementById('build-status');
   const buildButtons = Array.from(document.querySelectorAll('.build-btn'));
   const panelButtons = Array.from(document.querySelectorAll('.panel-btn'));
@@ -19,6 +22,9 @@
   const joystickEl = document.getElementById('touch-joystick');
   const joystickHandle = joystickEl ? joystickEl.querySelector('.stick-handle') : null;
   const actionButtons = Array.from(document.querySelectorAll('.action-btn'));
+  const buildMenuBaseTop = buildMenu
+    ? Number.parseFloat(window.getComputedStyle(buildMenu).top) || buildMenu.offsetTop
+    : 0;
 
   let dialogTimer = null;
   let ws = null;
@@ -245,6 +251,8 @@
 
   function renderInventory(items) {
     if (!inventoryList) return;
+    const previousScrollTop = inventoryList.scrollTop;
+    const shouldStick = inventoryList.scrollTop + inventoryList.clientHeight >= inventoryList.scrollHeight - 8;
     while (inventoryList.firstChild) {
       inventoryList.removeChild(inventoryList.firstChild);
     }
@@ -276,6 +284,11 @@
       }
       inventoryList.appendChild(row);
     });
+    if (shouldStick) {
+      inventoryList.scrollTop = inventoryList.scrollHeight;
+    } else {
+      inventoryList.scrollTop = Math.min(previousScrollTop, inventoryList.scrollHeight);
+    }
   }
 
   function setBuildStatus(text) {
@@ -416,7 +429,7 @@
   function setupPanelControls(panelId) {
     const panel = document.getElementById(panelId);
     if (!panel) return;
-    const state = { collapsed: false };
+    const state = { collapsed: panel.classList.contains('collapsed') };
     panelButtons
       .filter((button) => button.dataset.panel === panelId)
       .forEach((button) => {
@@ -425,10 +438,23 @@
           if (action === 'toggle') {
             state.collapsed = !state.collapsed;
             panel.classList.toggle('collapsed', state.collapsed);
+            if (panelId === 'inventory') {
+              updateBuildMenuPosition();
+            }
             return;
           }
         });
       });
+  }
+
+  function updateBuildMenuPosition() {
+    if (!inventoryPanel || !buildMenu || !hudEl) return;
+    if (!Number.isFinite(buildMenuBaseTop)) return;
+    const inventoryRect = inventoryPanel.getBoundingClientRect();
+    const hudRect = hudEl.getBoundingClientRect();
+    const gap = 12;
+    const nextTop = Math.round(inventoryRect.bottom - hudRect.top + gap);
+    buildMenu.style.top = `${nextTop}px`;
   }
 
   function setUiScale(value) {
@@ -437,6 +463,7 @@
     if (uiScaleValue) {
       uiScaleValue.textContent = `${Math.round(uiScale * 100)}%`;
     }
+    updateBuildMenuPosition();
     try {
       localStorage.setItem('ui-scale', uiScale.toString());
     } catch (err) {
@@ -1619,6 +1646,12 @@
     }
   });
 
+  if (inventoryPanel) {
+    inventoryPanel.classList.add('collapsed');
+  }
+  if (buildMenu) {
+    buildMenu.classList.add('collapsed');
+  }
   setupPanelControls('inventory');
   setupPanelControls('chat');
   setupPanelControls('build-menu');
@@ -1632,6 +1665,8 @@
     console.warn('UI scale load failed', err);
   }
   setUiScale(savedScale);
+  updateBuildMenuPosition();
+  window.addEventListener('resize', updateBuildMenuPosition);
   window.addEventListener('mousemove', handlePointerPreview);
   app.view.addEventListener('mouseleave', clearBuildPreview);
 
