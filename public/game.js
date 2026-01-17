@@ -704,6 +704,7 @@
   function applyWalkAnimation(entity, now, baseY) {
     const moveDistance = Math.hypot(entity.targetX - entity.startX, entity.targetY - entity.startY);
     const sprite = entity.sprite;
+    const facingSign = entity.facing === 'left' ? -1 : 1;
     if (moveDistance > 0.01) {
       const phase = now / 70 + entity.walkOffset;
       const stride = Math.sin(phase);
@@ -711,13 +712,14 @@
       const bob = Math.abs(stride) * tileSize * 0.06;
       sprite.rotation = swing * 0.35;
       sprite.skew.x = swing * 0.1;
-      sprite.scale.x = 1 + stride * 0.04;
+      sprite.scale.x = facingSign * (1 + stride * 0.04);
       sprite.scale.y = 1 - stride * 0.03;
       sprite.y = baseY + bob;
     } else {
       sprite.rotation = 0;
       sprite.skew.x = 0;
-      sprite.scale.set(1);
+      sprite.scale.x = facingSign;
+      sprite.scale.y = 1;
       sprite.y = baseY;
     }
   }
