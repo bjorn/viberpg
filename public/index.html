@@ -46,8 +46,18 @@
     </div>
 
     <div id="build-menu" class="panel ui-scale origin-top-left">
-      <div class="panel-title">Build</div>
-      <div id="build-options">
+      <div class="panel-header">
+        <div class="panel-title">Build</div>
+        <div class="panel-controls">
+          <button class="panel-btn panel-toggle" data-panel="build-menu" data-action="toggle" type="button" aria-label="Toggle build menu" title="Toggle build menu">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="square" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="build-options">
         <button class="build-btn" data-build="hut_wood" type="button">Wood Hut (20 wood)</button>
         <button class="build-btn" data-build="house_stone" type="button">Stone House (50 stone)</button>
         <button class="build-btn" data-build="bridge_wood" type="button">Wood Bridge (10 wood)</button>
@@ -55,8 +65,9 @@
         <button class="build-btn" data-build="path" type="button">Path (shovel)</button>
         <button class="build-btn" data-build="road" type="button">Road (2 stone + shovel)</button>
         <button class="build-btn" data-build="demolish" type="button">Demolish</button>
+        </div>
+        <div id="build-status">Select a build option.</div>
       </div>
-      <div id="build-status">Select a build option.</div>
     </div>
 
     <div id="chat" class="panel ui-scale origin-bottom-right">

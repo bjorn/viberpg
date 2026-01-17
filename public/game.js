@@ -1541,6 +1541,7 @@
 
   setupPanelControls('inventory');
   setupPanelControls('chat');
+  setupPanelControls('build-menu');
   let savedScale = 1;
   try {
     const raw = localStorage.getItem('ui-scale');

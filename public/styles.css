@@ -153,6 +153,10 @@ canvas {
   margin-bottom: 8px;
 }
 
+.panel.collapsed .panel-header {
+  margin-bottom: 0;
+}
+
 .panel-controls {
   display: flex;
   gap: 6px;
@@ -290,6 +294,8 @@ canvas {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-height: clamp(140px, 32vh, 260px);
+  overflow-y: auto;
 }
 
 .build-btn {
@@ -590,7 +596,7 @@ canvas {
 
   #chat {
     right: 12px;
-    top: 12px;
+    top: calc(68px + env(safe-area-inset-top));
     bottom: auto;
     width: min(320px, 68vw);
   }
