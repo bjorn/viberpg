@@ -44,6 +44,15 @@ This document describes the HTTP and WebSocket payloads used by the client and s
 ```
 - Server trims to 160 chars.
 
+#### set_name
+```json
+{
+  "type": "set_name",
+  "name": "Wanderer"
+}
+```
+- Server trims to 20 chars and ignores empty names.
+
 #### typing
 ```json
 {

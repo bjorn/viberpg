@@ -36,6 +36,7 @@ const PLAYER_REGEN_INTERVAL_MS: i64 = 5_000;
 const TYPING_TIMEOUT_MS: i64 = 2500;
 const CHUNK_KEEP_RADIUS: i32 = 3;
 const CHUNK_TTL_MS: i64 = 60_000;
+const MAX_NAME_CHARS: usize = 20;
 
 const TILE_GRASS: u8 = 0;
 const TILE_WATER: u8 = 1;
@@ -271,6 +272,31 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                     },
                 )
                 .await;
+            }
+        }
+        ClientMessage::SetName { name } => {
+            let normalized = match normalize_player_name(&name) {
+                Some(normalized) => normalized,
+                None => return,
+            };
+            let doc = {
+                let mut state = app_state.state.write().await;
+                let player = match state.players.get_mut(sid) {
+                    Some(player) => player,
+                    None => return,
+                };
+                if player.name == normalized {
+                    None
+                } else {
+                    player.name = normalized.clone();
+                    Some(player.to_doc())
+                }
+            };
+            if let Some(doc) = doc {
+                let store = app_state.store.clone();
+                tokio::spawn(async move {
+                    let _ = store.save_player(&doc).await;
+                });
             }
         }
         ClientMessage::Typing { typing } => {
@@ -1376,6 +1402,19 @@ fn random_name() -> String {
     format!("Adventurer{}", rng.gen_range(1000..9999))
 }
 
+fn normalize_player_name(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let cleaned: String = trimmed.chars().filter(|ch| !ch.is_control()).collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(cleaned.chars().take(MAX_NAME_CHARS).collect())
+}
+
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2021,6 +2060,9 @@ enum ClientMessage {
     },
     Chat {
         text: String,
+    },
+    SetName {
+        name: String,
     },
     Typing {
         typing: bool,

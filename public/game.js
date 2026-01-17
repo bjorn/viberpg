@@ -2,6 +2,8 @@
   const statusEl = document.getElementById('status');
   const chatLog = document.getElementById('chat-log');
   const chatInput = document.getElementById('chat-input');
+  const nameInput = document.getElementById('name-input');
+  const nameSave = document.getElementById('name-save');
   const dialogEl = document.getElementById('dialog');
   const dialogTitle = document.getElementById('dialog-title');
   const dialogText = document.getElementById('dialog-text');
@@ -41,6 +43,7 @@
   const overlayLayer = new PIXI.Container();
   const projectileLayer = new PIXI.Container();
   entityLayer.sortableChildren = true;
+  overlayLayer.sortableChildren = true;
   world.addChild(tileLayer, entityLayer, projectileLayer, overlayLayer);
   app.stage.addChild(world);
 
@@ -99,6 +102,7 @@
   const INTERP_MS = 120;
   const MAX_CHAT_LINES = 60;
   const TYPING_IDLE_MS = 1800;
+  const MAX_NAME_CHARS = 20;
   let localTyping = false;
   let typingTimer = null;
   let lastTypingSent = 0;
@@ -106,12 +110,86 @@
   let joystickPointerId = null;
   let joystickCenter = { x: 0, y: 0 };
   let joystickMaxRadius = 0;
+  let lastKnownName = '';
+  let nameStyle = null;
+  let pendingName = null;
 
   function worldToPixels(x, y, anchor) {
     return {
       x: (x + anchor.x) * tileSize,
       y: (y + anchor.y) * tileSize,
     };
+  }
+
+  function normalizeNameInput(value) {
+    return value.trim().replace(/\s+/g, ' ').slice(0, MAX_NAME_CHARS);
+  }
+
+  function refreshNameStyle() {
+    const fontSize = Math.max(12, Math.round(tileSize * 0.5));
+    nameStyle = new PIXI.TextStyle({
+      fontFamily: 'VT323',
+      fontSize,
+      fill: 0xe8f4ea,
+      stroke: 0x0b0e14,
+      strokeThickness: 3,
+    });
+    for (const entity of playerEntities.values()) {
+      if (entity.label) {
+        entity.label.style = nameStyle;
+      }
+    }
+  }
+
+  function syncLocalName(name) {
+    if (!nameInput) return;
+    if (pendingName && name !== pendingName) {
+      return;
+    }
+    if (pendingName && name === pendingName) {
+      pendingName = null;
+    }
+    lastKnownName = name || '';
+    if (document.activeElement !== nameInput) {
+      nameInput.value = lastKnownName;
+    }
+  }
+
+  function ensurePlayerLabel(entity, name) {
+    const safeName = name || 'Wanderer';
+    if (!nameStyle) {
+      refreshNameStyle();
+    }
+    if (!entity.label) {
+      const label = new PIXI.Text(safeName, nameStyle);
+      label.anchor.set(0.5, 0);
+      overlayLayer.addChild(label);
+      entity.label = label;
+      entity.name = safeName;
+      return;
+    }
+    if (entity.name !== safeName) {
+      entity.name = safeName;
+      entity.label.text = safeName;
+    }
+  }
+
+  function submitNameChange() {
+    if (!nameInput) return;
+    const normalized = normalizeNameInput(nameInput.value);
+    if (!normalized) {
+      if (lastKnownName) {
+        nameInput.value = lastKnownName;
+      }
+      return;
+    }
+    nameInput.value = normalized;
+    if (normalized === lastKnownName) return;
+    lastKnownName = normalized;
+    pendingName = normalized;
+    if (wsOpen) {
+      sendMessage({ type: 'set_name', name: normalized });
+    }
   }
 
   function addChat(text, className) {
@@ -204,6 +282,7 @@
       }
       indicator.container.x = entity.sprite.x;
       indicator.container.y = entity.sprite.y - tileSize * 1.35;
+      indicator.container.zIndex = entity.sprite.y + tileSize;
       const phase = Math.floor((now / 260) % 3) + 1;
       indicator.text.text = '.'.repeat(phase);
     }
@@ -464,9 +543,11 @@
       } else {
         updateEntityTarget(entity, player.x, player.y, now);
       }
+      ensurePlayerLabel(entity, player.name);
       entity.hp = player.hp;
       if (player.id === playerId) {
         playerState = player;
+        syncLocalName(player.name);
       }
     });
 
@@ -642,6 +723,10 @@
     ws.send(JSON.stringify(payload));
   }
 
+  function isTextInputFocused() {
+    return document.activeElement === chatInput || document.activeElement === nameInput;
+  }
+
   function createEntityState(sprite, x, y, now, options = {}) {
     return {
       sprite,
@@ -656,6 +741,8 @@
       facing: options.facing ?? 'down',
       isAlt: options.isAlt ?? false,
       walkOffset: Math.random() * Math.PI * 2,
+      label: options.label ?? null,
+      name: options.name ?? null,
     };
   }
 
@@ -677,6 +764,12 @@
       entity.sprite.parent.removeChild(entity.sprite);
     }
     entity.sprite.destroy();
+    if (entity.label) {
+      if (entity.label.parent) {
+        entity.label.parent.removeChild(entity.label);
+      }
+      entity.label.destroy();
+    }
   }
 
   function lerp(a, b, t) {
@@ -755,6 +848,11 @@
       const baseY = basePos.y;
       applyWalkAnimation(entity, now, baseY);
       entity.sprite.zIndex = baseY;
+      if (entity.label) {
+        entity.label.x = basePos.x;
+        entity.label.y = baseY + tileSize * 0.2;
+        entity.label.zIndex = baseY + tileSize * 0.2;
+      }
     }
 
     for (const entity of monsterEntities.values()) {
@@ -777,6 +875,9 @@
     ws.addEventListener('open', () => {
       wsOpen = true;
       statusEl.textContent = 'Connected. Exploring...';
+      if (pendingName) {
+        sendMessage({ type: 'set_name', name: pendingName });
+      }
     });
 
     ws.addEventListener('message', (event) => {
@@ -789,6 +890,7 @@
           chunkSize = msg.world.chunk_size;
           worldSeed = msg.world.seed;
           ensureTextures();
+          refreshNameStyle();
           msg.npcs.forEach((npc) => addNpc(npc));
           statusEl.textContent = `HP ${msg.player.hp}`;
           syncPlayers([msg.player]);
@@ -894,7 +996,7 @@
   if (app.canvas) {
     app.canvas.addEventListener('pointerdown', (event) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
-      if (document.activeElement === chatInput) return;
+      if (isTextInputFocused()) return;
       pointerMoveState.active = true;
       pointerMoveState.pointerId = event.pointerId;
       app.canvas.setPointerCapture(event.pointerId);
@@ -946,7 +1048,7 @@
   }
 
   window.addEventListener('keydown', (event) => {
-    if (document.activeElement === chatInput) return;
+    if (isTextInputFocused()) return;
     keys.add(event.code);
     const arrowKey = normalizeArrowKey(event);
     if (arrowKey) {
@@ -961,13 +1063,34 @@
   });
 
   window.addEventListener('keyup', (event) => {
-    if (document.activeElement === chatInput) return;
+    if (isTextInputFocused()) return;
     keys.delete(event.code);
     const arrowKey = normalizeArrowKey(event);
     if (arrowKey) {
       keys.delete(arrowKey);
     }
   });
+
+  if (nameInput && nameSave) {
+    nameSave.addEventListener('click', () => {
+      submitNameChange();
+      nameInput.blur();
+    });
+
+    nameInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        submitNameChange();
+        nameInput.blur();
+      }
+      event.stopPropagation();
+    });
+
+    nameInput.addEventListener('blur', () => {
+      if (nameInput.value.trim().length === 0) {
+        nameInput.value = lastKnownName;
+      }
+    });
+  }
 
   chatInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -1010,7 +1133,7 @@
 
   setInterval(() => {
     if (!wsOpen) return;
-    const inputLocked = document.activeElement === chatInput;
+    const inputLocked = isTextInputFocused();
     const usingTouch = touchState.active;
     const usingPointerMove = pointerMoveState.active;
     const dirX = inputLocked
@@ -1061,7 +1184,18 @@
   });
 
   fetch('/api/session')
-    .then(() => connect())
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error('Session failed');
+      }
+      return response.json();
+    })
+    .then((session) => {
+      if (session?.name) {
+        syncLocalName(session.name);
+      }
+      connect();
+    })
     .catch(() => {
       statusEl.textContent = 'Failed to start session.';
     });

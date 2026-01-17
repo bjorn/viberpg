@@ -141,6 +141,44 @@ canvas {
   color: var(--accent-2);
 }
 
+.field-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+#name-input {
+  flex: 1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(10, 12, 16, 0.9);
+  color: var(--text);
+  padding: 6px 8px;
+  font-family: "VT323", monospace;
+  font-size: 18px;
+  outline: none;
+}
+
+#name-save {
+  border: 1px solid rgba(122, 213, 163, 0.6);
+  background: rgba(10, 14, 20, 0.85);
+  color: var(--accent);
+  font-family: "VT323", monospace;
+  font-size: 18px;
+  padding: 6px 10px;
+  cursor: pointer;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+#name-save:active {
+  transform: translateY(1px);
+}
+
 #chat-input {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.12);
