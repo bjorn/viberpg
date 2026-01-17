@@ -622,7 +622,7 @@
     const moveDistance = Math.hypot(entity.targetX - entity.startX, entity.targetY - entity.startY);
     const sprite = entity.sprite;
     if (moveDistance > 0.01) {
-      const phase = now / 140 + entity.walkOffset;
+      const phase = now / 70 + entity.walkOffset;
       const stride = Math.sin(phase);
       const swing = stride * 0.18;
       const bob = Math.abs(stride) * tileSize * 0.06;
