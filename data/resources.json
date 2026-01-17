@@ -10,6 +10,37 @@
     ]
   },
   {
+    "id": "apple_tree",
+    "name": "Apple Tree",
+    "tool": "axe",
+    "hp": 3,
+    "respawn_ms": 45000,
+    "drops": [
+      { "id": "wood", "count": 2 },
+      { "id": "apple", "count": 1 }
+    ]
+  },
+  {
+    "id": "pine_tree",
+    "name": "Pine Tree",
+    "tool": "axe",
+    "hp": 3,
+    "respawn_ms": 45000,
+    "drops": [
+      { "id": "wood", "count": 2 }
+    ]
+  },
+  {
+    "id": "palm_tree",
+    "name": "Palm",
+    "tool": "axe",
+    "hp": 3,
+    "respawn_ms": 45000,
+    "drops": [
+      { "id": "wood", "count": 2 }
+    ]
+  },
+  {
     "id": "rock",
     "name": "Rock",
     "tool": "pick",

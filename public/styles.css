@@ -115,6 +115,106 @@ canvas {
   white-space: pre-line;
 }
 
+#inventory {
+  position: absolute;
+  left: 20px;
+  top: 90px;
+  width: 220px;
+  padding: 12px;
+  pointer-events: auto;
+}
+
+.panel-title {
+  font-family: "Press Start 2P", cursive;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--accent-2);
+  margin-bottom: 8px;
+}
+
+#inventory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 18px;
+}
+
+.inventory-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--text);
+}
+
+.inventory-item .count {
+  color: var(--text-muted);
+}
+
+.inventory-item.is-usable {
+  border-color: rgba(122, 213, 163, 0.45);
+  background: rgba(10, 12, 16, 0.6);
+  cursor: pointer;
+}
+
+.inventory-item.is-usable:active {
+  transform: translateY(1px);
+}
+
+#inventory-list .empty {
+  color: var(--text-muted);
+  font-size: 16px;
+}
+
+#build-menu {
+  position: absolute;
+  left: 20px;
+  top: 330px;
+  width: 220px;
+  padding: 12px;
+  pointer-events: auto;
+}
+
+#build-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.build-btn {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(10, 14, 20, 0.85);
+  color: var(--text);
+  font-family: "VT323", monospace;
+  font-size: 18px;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.build-btn.active {
+  border-color: rgba(122, 213, 163, 0.6);
+  color: var(--accent);
+}
+
+.build-btn:active {
+  transform: translateY(1px);
+}
+
+#build-status {
+  margin-top: 8px;
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
 #chat {
   position: absolute;
   right: 20px;
@@ -381,6 +481,18 @@ canvas {
     width: min(320px, 68vw);
   }
 
+  #inventory {
+    left: 12px;
+    top: 12px;
+    width: min(240px, 60vw);
+  }
+
+  #build-menu {
+    left: 12px;
+    top: 220px;
+    width: min(240px, 60vw);
+  }
+
   #dialog {
     left: 12px;
     width: min(320px, 72vw);
@@ -434,5 +546,13 @@ canvas {
   #chat,
   #dialog {
     width: 260px;
+  }
+
+  #inventory {
+    width: 200px;
+  }
+
+  #build-menu {
+    width: 200px;
   }
 }

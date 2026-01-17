@@ -9,8 +9,27 @@
     "ammo_for": null
   },
   {
+    "id": "apple",
+    "name": "Apple",
+    "kind": "food",
+    "tool": null,
+    "power": null,
+    "weapon": null,
+    "ammo_for": null,
+    "heal": 2
+  },
+  {
     "id": "stone",
     "name": "Stone",
+    "kind": "resource",
+    "tool": null,
+    "power": null,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "boar_leg",
+    "name": "Boar Leg",
     "kind": "resource",
     "tool": null,
     "power": null,
@@ -58,6 +77,15 @@
     "name": "Basic Pickaxe",
     "kind": "tool",
     "tool": "pick",
+    "power": 1,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "basic_shovel",
+    "name": "Shovel",
+    "kind": "tool",
+    "tool": "shovel",
     "power": 1,
     "weapon": null,
     "ammo_for": null

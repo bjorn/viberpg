@@ -14,10 +14,10 @@
   {
     "id": "quest_hunter",
     "npc_id": "npc_hunter",
-    "name": "Slime Cores",
-    "description": "Bring 3 slime cores to Bram.",
+    "name": "Boar Legs",
+    "description": "Bring 3 boar legs to Bram.",
     "requires": [
-      { "id": "slime_core", "count": 3 }
+      { "id": "boar_leg", "count": 3 }
     ],
     "rewards": [
       { "id": "bow", "count": 1 },

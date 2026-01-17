@@ -53,6 +53,34 @@ This document describes the HTTP and WebSocket payloads used by the client and s
 ```
 - Server trims to 20 chars and ignores empty names.
 
+#### use_item
+```json
+{
+  "type": "use_item",
+  "id": "apple"
+}
+```
+
+#### build
+```json
+{
+  "type": "build",
+  "kind": "hut_wood",
+  "x": 10,
+  "y": 8
+}
+```
+- `kind` options: `hut_wood`, `house_stone`, `bridge_wood`, `bridge_stone`, `path`, `road`.
+
+#### demolish
+```json
+{
+  "type": "demolish",
+  "x": 10,
+  "y": 8
+}
+```
+
 #### typing
 ```json
 {
@@ -93,6 +121,9 @@ This document describes the HTTP and WebSocket payloads used by the client and s
     "hp": 10,
     "inventory": { "wood": 3 }
   },
+  "inventory_items": [
+    { "id": "wood", "name": "Wood", "count": 3, "heal": null }
+  ],
   "world": {
     "seed": 123,
     "chunk_size": 32,
@@ -115,6 +146,9 @@ This document describes the HTTP and WebSocket payloads used by the client and s
   "tiles": [0, 0, 1, 2],
   "resources": [
     { "id": "42", "kind": "tree", "x": 10, "y": 7, "hp": 3 }
+  ],
+  "structures": [
+    { "id": 12, "kind": "hut_wood", "x": 11, "y": 7 }
   ]
 }
 ```
@@ -144,6 +178,28 @@ This document describes the HTTP and WebSocket payloads used by the client and s
 }
 ```
 - `state` is either `"removed"` or `"spawned"`.
+
+#### structure_update
+```json
+{
+  "type": "structure_update",
+  "structures": [
+    { "id": 12, "kind": "hut_wood", "x": 11, "y": 7 }
+  ],
+  "state": "added"
+}
+```
+- Bridge structures use `bridge_wood_h`/`bridge_wood_v` or `bridge_stone_h`/`bridge_stone_v` kinds.
+
+#### inventory
+```json
+{
+  "type": "inventory",
+  "items": [
+    { "id": "apple", "name": "Apple", "count": 2, "heal": 2 }
+  ]
+}
+```
 
 #### chat
 ```json

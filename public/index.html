@@ -22,6 +22,25 @@
       <div id="dialog-text"></div>
     </div>
 
+    <div id="inventory" class="panel">
+      <div class="panel-title">Inventory</div>
+      <div id="inventory-list"></div>
+    </div>
+
+    <div id="build-menu" class="panel">
+      <div class="panel-title">Build</div>
+      <div id="build-options">
+        <button class="build-btn" data-build="hut_wood" type="button">Wood Hut (20 wood)</button>
+        <button class="build-btn" data-build="house_stone" type="button">Stone House (50 stone)</button>
+        <button class="build-btn" data-build="bridge_wood" type="button">Wood Bridge (10 wood)</button>
+        <button class="build-btn" data-build="bridge_stone" type="button">Stone Bridge (20 stone)</button>
+        <button class="build-btn" data-build="path" type="button">Path (shovel)</button>
+        <button class="build-btn" data-build="road" type="button">Road (2 stone + shovel)</button>
+        <button class="build-btn" data-build="demolish" type="button">Demolish</button>
+      </div>
+      <div id="build-status">Select a build option.</div>
+    </div>
+
     <div id="chat" class="panel">
       <div id="name-panel" class="field-row">
         <input id="name-input" type="text" maxlength="20" placeholder="Name" autocomplete="nickname" aria-label="Player name" />

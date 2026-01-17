@@ -4,6 +4,9 @@
   const chatInput = document.getElementById('chat-input');
   const nameInput = document.getElementById('name-input');
   const nameSave = document.getElementById('name-save');
+  const inventoryList = document.getElementById('inventory-list');
+  const buildStatus = document.getElementById('build-status');
+  const buildButtons = Array.from(document.querySelectorAll('.build-btn'));
   const dialogEl = document.getElementById('dialog');
   const dialogTitle = document.getElementById('dialog-title');
   const dialogText = document.getElementById('dialog-text');
@@ -39,12 +42,14 @@
 
   const world = new PIXI.Container();
   const tileLayer = new PIXI.Container();
+  const structureLayer = new PIXI.Container();
   const entityLayer = new PIXI.Container();
   const overlayLayer = new PIXI.Container();
   const projectileLayer = new PIXI.Container();
   entityLayer.sortableChildren = true;
+  structureLayer.sortableChildren = true;
   overlayLayer.sortableChildren = true;
-  world.addChild(tileLayer, entityLayer, projectileLayer, overlayLayer);
+  world.addChild(tileLayer, structureLayer, entityLayer, projectileLayer, overlayLayer);
   app.stage.addChild(world);
 
   const tileAssetUrls = [
@@ -52,10 +57,20 @@
     'assets/tiles/water.svg',
     'assets/tiles/sand.svg',
     'assets/tiles/dirt.svg',
+    'assets/tiles/grass-flowers.svg',
   ];
   const entityAssetUrls = [
     'assets/entities/tree.svg',
+    'assets/entities/tree-apple.svg',
+    'assets/entities/tree-pine.svg',
+    'assets/entities/palm.svg',
     'assets/entities/rock.svg',
+    'assets/entities/hut-wood.svg',
+    'assets/entities/house-stone.svg',
+    'assets/entities/bridge-wood.svg',
+    'assets/entities/bridge-stone.svg',
+    'assets/entities/path.svg',
+    'assets/entities/road.svg',
     'assets/entities/player.svg',
     'assets/entities/player-back.svg',
     'assets/entities/player-side.svg',
@@ -64,6 +79,7 @@
     'assets/entities/player-alt-side.svg',
     'assets/entities/npc.svg',
     'assets/entities/slime.svg',
+    'assets/entities/boar.svg',
     'assets/entities/arrow.svg',
   ];
   await PIXI.Assets.load([...tileAssetUrls, ...entityAssetUrls]);
@@ -72,6 +88,7 @@
 
   const chunkTiles = new Map();
   const resourceSprites = new Map();
+  const structureSprites = new Map();
   const playerEntities = new Map();
   const monsterEntities = new Map();
   const projectileSprites = new Map();
@@ -113,6 +130,8 @@
   let lastKnownName = '';
   let nameStyle = null;
   let pendingName = null;
+  let buildMode = null;
+  let pendingDemolish = null;
 
   function worldToPixels(x, y, anchor) {
     return {
@@ -204,6 +223,103 @@
     if (shouldStick) {
       chatLog.scrollTop = chatLog.scrollHeight;
     }
+  }
+
+  function renderInventory(items) {
+    if (!inventoryList) return;
+    while (inventoryList.firstChild) {
+      inventoryList.removeChild(inventoryList.firstChild);
+    }
+    if (!items || items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Empty';
+      inventoryList.appendChild(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'inventory-item';
+      const nameEl = document.createElement('span');
+      nameEl.textContent = item.name;
+      const countEl = document.createElement('span');
+      countEl.className = 'count';
+      countEl.textContent = `x${item.count}`;
+      row.appendChild(nameEl);
+      row.appendChild(countEl);
+      if (item.heal) {
+        row.classList.add('is-usable');
+        row.setAttribute('role', 'button');
+        row.setAttribute('tabindex', '0');
+        row.title = 'Click to eat';
+        row.addEventListener('click', () => {
+          sendMessage({ type: 'use_item', id: item.id });
+        });
+      }
+      inventoryList.appendChild(row);
+    });
+  }
+
+  function setBuildStatus(text) {
+    if (!buildStatus) return;
+    buildStatus.textContent = text;
+  }
+
+  function setBuildMode(mode) {
+    buildMode = buildMode === mode ? null : mode;
+    pendingDemolish = null;
+    buildButtons.forEach((button) => {
+      button.classList.toggle('active', button.dataset.build === buildMode);
+    });
+    if (!buildMode) {
+      setBuildStatus('Select a build option.');
+    } else if (buildMode === 'demolish') {
+      setBuildStatus('Click a structure twice to remove it.');
+    } else {
+      setBuildStatus('Click the map to place.');
+    }
+  }
+
+  function screenToTile(event) {
+    const worldX = (event.clientX - world.x) / tileSize;
+    const worldY = (event.clientY - world.y) / tileSize;
+    return {
+      x: Math.floor(worldX),
+      y: Math.floor(worldY),
+    };
+  }
+
+  function handleBuildClick(event) {
+    if (!buildMode) return false;
+    if (!wsOpen) {
+      setBuildStatus('Not connected.');
+      return true;
+    }
+    const tile = screenToTile(event);
+    if (buildMode === 'demolish') {
+      const now = performance.now();
+      if (
+        !pendingDemolish ||
+        pendingDemolish.x !== tile.x ||
+        pendingDemolish.y !== tile.y ||
+        now > pendingDemolish.expires
+      ) {
+        pendingDemolish = {
+          x: tile.x,
+          y: tile.y,
+          expires: now + 1200,
+        };
+        setBuildStatus('Click again to confirm demolition.');
+        return true;
+      }
+      sendMessage({ type: 'demolish', x: tile.x, y: tile.y });
+      pendingDemolish = null;
+      setBuildStatus('Demolition requested.');
+      return true;
+    }
+    sendMessage({ type: 'build', kind: buildMode, x: tile.x, y: tile.y });
+    setBuildStatus('Placement requested.');
+    return true;
   }
 
   function setLocalTyping(nextState) {
@@ -491,6 +607,7 @@
     }
     loadedChunks.add(key);
     chunk.resources.forEach((res) => upsertResource(res));
+    syncStructures(chunk.structures);
   }
 
   function upsertResource(resource) {
@@ -521,6 +638,80 @@
       sprite.destroy();
       resourceSprites.delete(id);
     }
+  }
+
+  const groundStructureKinds = new Set([
+    'path',
+    'road',
+    'bridge_wood',
+    'bridge_wood_h',
+    'bridge_wood_v',
+    'bridge_stone',
+    'bridge_stone_h',
+    'bridge_stone_v',
+  ]);
+
+  function structureKey(structure) {
+    return `${structure.id}:${structure.x}:${structure.y}`;
+  }
+
+  function upsertStructure(structure) {
+    const key = structureKey(structure);
+    let entry = structureSprites.get(key);
+    if (!entry) {
+      const textureKey = structure.kind.replace(/_(h|v)$/, '');
+      const texture = textures[textureKey];
+      if (!texture) return;
+      const sprite = new PIXI.Sprite(texture);
+      const isGround = groundStructureKinds.has(structure.kind);
+      const isBridge = structure.kind.startsWith('bridge_');
+      if (isGround) {
+        if (isBridge) {
+          sprite.anchor.set(0.5, 0.5);
+        } else {
+          sprite.anchor.set(0, 0);
+        }
+        structureLayer.addChild(sprite);
+      } else {
+        sprite.anchor.set(0.5, 0.9);
+        entityLayer.addChild(sprite);
+      }
+      entry = { sprite, isGround, isBridge };
+      structureSprites.set(key, entry);
+    }
+    if (entry.isGround) {
+      if (entry.isBridge) {
+        entry.sprite.x = (structure.x + 0.5) * tileSize;
+        entry.sprite.y = (structure.y + 0.5) * tileSize;
+        entry.sprite.rotation = structure.kind.endsWith('_v') ? Math.PI / 2 : 0;
+      } else {
+        entry.sprite.x = structure.x * tileSize;
+        entry.sprite.y = structure.y * tileSize;
+        entry.sprite.rotation = 0;
+      }
+      entry.sprite.zIndex = structure.y * tileSize;
+    } else {
+      const basePos = worldToPixels(structure.x, structure.y, PLAYER_ANCHOR);
+      entry.sprite.x = basePos.x;
+      entry.sprite.y = basePos.y;
+      entry.sprite.zIndex = basePos.y;
+    }
+  }
+
+  function removeStructure(structure) {
+    const key = structureKey(structure);
+    const entry = structureSprites.get(key);
+    if (!entry) return;
+    if (entry.sprite.parent) {
+      entry.sprite.parent.removeChild(entry.sprite);
+    }
+    entry.sprite.destroy();
+    structureSprites.delete(key);
+  }
+
+  function syncStructures(structures) {
+    if (!structures) return;
+    structures.forEach((structure) => upsertStructure(structure));
   }
 
   function syncPlayers(players) {
@@ -686,7 +877,16 @@
     };
 
     textures.tree = PIXI.Texture.from('assets/entities/tree.svg');
+    textures.apple_tree = PIXI.Texture.from('assets/entities/tree-apple.svg');
+    textures.pine_tree = PIXI.Texture.from('assets/entities/tree-pine.svg');
+    textures.palm_tree = PIXI.Texture.from('assets/entities/palm.svg');
     textures.rock = PIXI.Texture.from('assets/entities/rock.svg');
+    textures.hut_wood = PIXI.Texture.from('assets/entities/hut-wood.svg');
+    textures.house_stone = PIXI.Texture.from('assets/entities/house-stone.svg');
+    textures.bridge_wood = PIXI.Texture.from('assets/entities/bridge-wood.svg');
+    textures.bridge_stone = PIXI.Texture.from('assets/entities/bridge-stone.svg');
+    textures.path = PIXI.Texture.from('assets/entities/path.svg');
+    textures.road = PIXI.Texture.from('assets/entities/road.svg');
     textures.playerFront = PIXI.Texture.from('assets/entities/player.svg');
     textures.playerBack = PIXI.Texture.from('assets/entities/player-back.svg');
     textures.playerSide = PIXI.Texture.from('assets/entities/player-side.svg');
@@ -695,6 +895,7 @@
     textures.playerAltSide = PIXI.Texture.from('assets/entities/player-alt-side.svg');
     textures.npc = PIXI.Texture.from('assets/entities/npc.svg');
     textures.slime = PIXI.Texture.from('assets/entities/slime.svg');
+    textures.boar = PIXI.Texture.from('assets/entities/boar.svg');
     textures.arrow = PIXI.Texture.from('assets/entities/arrow.svg');
 
     return textures;
@@ -865,6 +1066,7 @@
       entity.sprite.zIndex = basePos.y;
     }
 
+    structureLayer.sortChildren();
     entityLayer.sortChildren();
   }
 
@@ -891,6 +1093,9 @@
           worldSeed = msg.world.seed;
           ensureTextures();
           refreshNameStyle();
+          if (msg.inventory_items) {
+            renderInventory(msg.inventory_items);
+          }
           msg.npcs.forEach((npc) => addNpc(npc));
           statusEl.textContent = `HP ${msg.player.hp}`;
           syncPlayers([msg.player]);
@@ -914,6 +1119,18 @@
           } else {
             upsertResource(msg.resource);
           }
+          break;
+        }
+        case 'structure_update': {
+          if (msg.state === 'removed') {
+            msg.structures.forEach((structure) => removeStructure(structure));
+          } else {
+            msg.structures.forEach((structure) => upsertStructure(structure));
+          }
+          break;
+        }
+        case 'inventory': {
+          renderInventory(msg.items);
           break;
         }
         case 'chat': {
@@ -961,6 +1178,17 @@
     document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
   }
 
+  if (buildButtons.length) {
+    buildButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const mode = button.dataset.build;
+        if (mode) {
+          setBuildMode(mode);
+        }
+      });
+    });
+  }
+
   if (joystickEl && joystickHandle) {
     joystickEl.addEventListener('pointerdown', (event) => {
       event.preventDefault();
@@ -997,6 +1225,10 @@
     app.canvas.addEventListener('pointerdown', (event) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
       if (isTextInputFocused()) return;
+      if (handleBuildClick(event)) {
+        event.preventDefault();
+        return;
+      }
       pointerMoveState.active = true;
       pointerMoveState.pointerId = event.pointerId;
       app.canvas.setPointerCapture(event.pointerId);

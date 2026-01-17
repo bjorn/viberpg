@@ -13,6 +13,7 @@ use rand::Rng;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     net::SocketAddr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -42,6 +43,7 @@ const TILE_GRASS: u8 = 0;
 const TILE_WATER: u8 = 1;
 const TILE_SAND: u8 = 2;
 const TILE_DIRT: u8 = 3;
+const TILE_FLOWER: u8 = 4;
 
 #[derive(Clone)]
 struct AppState {
@@ -67,6 +69,28 @@ async fn main() -> AppResult<()> {
         .unwrap_or_else(|_| "mongodb://localhost:27017".to_string());
     let store = GameStore::new(&mongo_uri).await?;
     let state = Arc::new(RwLock::new(GameState::new()));
+    {
+        let structures = store.load_structures().await?;
+        let mut state_guard = state.write().await;
+        let mut max_id = 0;
+        for doc in structures {
+            let id = doc.id as u64;
+            max_id = max_id.max(id);
+            let tile = StructureTile {
+                id,
+                kind: doc.kind,
+                x: doc.x,
+                y: doc.y,
+                owner_id: doc.owner_id,
+            };
+            state_guard
+                .structure_tiles
+                .insert(TileCoord { x: tile.x, y: tile.y }, tile);
+        }
+        if max_id >= state_guard.next_structure_id {
+            state_guard.next_structure_id = max_id + 1;
+        }
+    }
 
     let app_state = AppState {
         state: state.clone(),
@@ -180,10 +204,15 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
                 .cloned()
                 .map(NpcPublic::from)
                 .collect(),
+            inventory_items: build_inventory_items(&player.inventory, app_state.data.as_ref()),
         }
     };
 
     send_to_player(&app_state.state, &sid, welcome_msg).await;
+    let inventory_msg = ServerMessage::Inventory {
+        items: build_inventory_items(&doc.inventory, app_state.data.as_ref()),
+    };
+    send_to_player(&app_state.state, &sid, inventory_msg).await;
 
     while let Some(Ok(msg)) = socket_receiver.next().await {
         match msg {
@@ -299,6 +328,49 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                 });
             }
         }
+        ClientMessage::UseItem { id } => {
+            let (item_name, heal_amount) = match app_state.data.items.get(&id) {
+                Some(def) => (def.name.clone(), def.heal),
+                None => return,
+            };
+            let heal_amount = match heal_amount {
+                Some(amount) if amount > 0 => amount,
+                _ => return,
+            };
+            let mut state = app_state.state.write().await;
+            let (items, player_id, message) = {
+                let player = match state.players.get_mut(sid) {
+                    Some(player) => player,
+                    None => return,
+                };
+                if !consume_item(&mut player.inventory, &id, 1) {
+                    return;
+                }
+                let hp_before = player.hp;
+                player.hp = (player.hp + heal_amount).min(MAX_HP);
+                player.last_inventory_hash = inventory_hash(&player.inventory);
+                let items = build_inventory_items(&player.inventory, app_state.data.as_ref());
+                let player_id = player.id.clone();
+                let message = if id == "apple" {
+                    "You eat an apple. An apple a day keeps the doctor away.".to_string()
+                } else if player.hp > hp_before {
+                    format!("You eat {} and feel better.", item_name)
+                } else {
+                    format!("You eat {}.", item_name)
+                };
+                (items, player_id, message)
+            };
+            if let Some(sender) = state.clients.get(sid) {
+                let _ = sender.send(ServerMessage::Inventory { items });
+            }
+            send_system_message(&mut state, &player_id, message);
+        }
+        ClientMessage::Build { kind, x, y } => {
+            handle_build_request(app_state, sid, kind, x, y).await;
+        }
+        ClientMessage::Demolish { x, y } => {
+            handle_demolish_request(app_state, sid, x, y).await;
+        }
         ClientMessage::Typing { typing } => {
             let now_ms = now_millis();
             let mut state = app_state.state.write().await;
@@ -351,21 +423,34 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
             state.spawned_chunks.insert(coord);
         }
 
-        let resources = state.resources.entry(coord).or_insert_with(|| {
-            generate_resources(
+        if !state.resources.contains_key(&coord) {
+            let generated = generate_resources(
                 app_state.world.seed,
                 coord,
                 &app_state.world,
                 &app_state.noise,
                 &app_state.data,
-            )
-        });
+                &state.structure_tiles,
+            );
+            state.resources.insert(coord, generated);
+        }
 
         let tiles = generate_tiles(coord, &app_state.world, &app_state.noise);
-        let visible_resources = resources
-            .iter()
-            .filter(|res| res.hp > 0)
-            .map(ResourceNodePublic::from)
+        let visible_resources = match state.resources.get(&coord) {
+            Some(resources) => resources
+                .iter()
+                .filter(|res| res.hp > 0)
+                .map(ResourceNodePublic::from)
+                .collect(),
+            None => Vec::new(),
+        };
+        let structures = state
+            .structure_tiles
+            .values()
+            .filter(|structure| {
+                chunk_coord_for_tile(structure.x, structure.y, app_state.world.chunk_size) == coord
+            })
+            .map(StructurePublic::from)
             .collect();
 
         let _ = sender.send(ServerMessage::ChunkData {
@@ -373,8 +458,301 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
             chunk_y: coord.y,
             tiles,
             resources: visible_resources,
+            structures,
         });
     }
+}
+
+async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: i32, y: i32) {
+    let mut state = app_state.state.write().await;
+    let (player_id, inventory_snapshot) = match state.players.get(sid) {
+        Some(player) => (player.id.clone(), player.inventory.clone()),
+        None => return,
+    };
+
+    let mut tiles = Vec::new();
+    let mut cost = Vec::new();
+    let mut require_shovel = false;
+    let mut requires_land = true;
+
+    let build_kind = kind.as_str();
+    let success_message = match build_kind {
+        "hut_wood" => {
+            cost.push(ItemStack {
+                id: "wood".to_string(),
+                count: 20,
+            });
+            tiles.push(TileCoord { x, y });
+            "You build a wooden hut."
+        }
+        "house_stone" => {
+            cost.push(ItemStack {
+                id: "stone".to_string(),
+                count: 50,
+            });
+            tiles.push(TileCoord { x, y });
+            "You build a stone house."
+        }
+        "bridge_wood" => {
+            cost.push(ItemStack {
+                id: "wood".to_string(),
+                count: 10,
+            });
+            requires_land = false;
+            match find_bridge_span(&app_state.noise, x, y) {
+                Some(span) => tiles = span,
+                None => {
+                    send_system_message(
+                        &mut state,
+                        &player_id,
+                        "Bridges must span 1-4 water tiles with land on both ends.".to_string(),
+                    );
+                    return;
+                }
+            }
+            "You build a wooden bridge."
+        }
+        "bridge_stone" => {
+            cost.push(ItemStack {
+                id: "stone".to_string(),
+                count: 20,
+            });
+            requires_land = false;
+            match find_bridge_span(&app_state.noise, x, y) {
+                Some(span) => tiles = span,
+                None => {
+                    send_system_message(
+                        &mut state,
+                        &player_id,
+                        "Bridges must span 1-4 water tiles with land on both ends.".to_string(),
+                    );
+                    return;
+                }
+            }
+            "You build a stone bridge."
+        }
+        "path" => {
+            require_shovel = true;
+            tiles.push(TileCoord { x, y });
+            "You lay down a path."
+        }
+        "road" => {
+            require_shovel = true;
+            cost.push(ItemStack {
+                id: "stone".to_string(),
+                count: 2,
+            });
+            tiles.push(TileCoord { x, y });
+            "You build a road."
+        }
+        _ => {
+            send_system_message(&mut state, &player_id, "Unknown build option.".to_string());
+            return;
+        }
+    };
+
+    let mut structure_kind = build_kind.to_string();
+    if build_kind == "bridge_wood" || build_kind == "bridge_stone" {
+        let is_vertical = tiles
+            .first()
+            .map(|first| tiles.iter().all(|tile| tile.x == first.x))
+            .unwrap_or(false);
+        if build_kind == "bridge_wood" {
+            structure_kind = if is_vertical {
+                "bridge_wood_v".to_string()
+            } else {
+                "bridge_wood_h".to_string()
+            };
+        } else {
+            structure_kind = if is_vertical {
+                "bridge_stone_v".to_string()
+            } else {
+                "bridge_stone_h".to_string()
+            };
+        }
+    }
+
+    if require_shovel && !has_tool(&inventory_snapshot, app_state.data.as_ref(), "shovel") {
+        send_system_message(
+            &mut state,
+            &player_id,
+            "You need a shovel.".to_string(),
+        );
+        return;
+    }
+
+    if !cost.is_empty() && !has_items(&inventory_snapshot, &cost) {
+        send_system_message(
+            &mut state,
+            &player_id,
+            "You don't have enough materials.".to_string(),
+        );
+        return;
+    }
+
+    for tile in &tiles {
+        if state
+            .structure_tiles
+            .contains_key(&TileCoord { x: tile.x, y: tile.y })
+        {
+            send_system_message(
+                &mut state,
+                &player_id,
+                "That spot is already occupied.".to_string(),
+            );
+            return;
+        }
+        if resource_at_tile(&state, tile.x, tile.y) {
+            send_system_message(
+                &mut state,
+                &player_id,
+                "Clear the resource first.".to_string(),
+            );
+            return;
+        }
+        if requires_land && tile_at(&app_state.noise, tile.x, tile.y) == TILE_WATER {
+            send_system_message(
+                &mut state,
+                &player_id,
+                "You can only build that on land.".to_string(),
+            );
+            return;
+        }
+    }
+
+    let mut inventory_items = None;
+    if !cost.is_empty() {
+        let mut removal_failed = false;
+        let items = {
+            let player = match state.players.get_mut(sid) {
+                Some(player) => player,
+                None => return,
+            };
+            if !remove_items(&mut player.inventory, &cost) {
+                removal_failed = true;
+                Vec::new()
+            } else {
+                player.last_inventory_hash = inventory_hash(&player.inventory);
+                build_inventory_items(&player.inventory, app_state.data.as_ref())
+            }
+        };
+        if removal_failed {
+            send_system_message(
+                &mut state,
+                &player_id,
+                "You don't have enough materials.".to_string(),
+            );
+            return;
+        }
+        inventory_items = Some(items);
+    }
+
+    let structure_id = state.next_structure_id();
+    let mut new_tiles = Vec::new();
+    for tile in tiles {
+        let structure = StructureTile {
+            id: structure_id,
+            kind: structure_kind.clone(),
+            x: tile.x,
+            y: tile.y,
+            owner_id: player_id.clone(),
+        };
+        state
+            .structure_tiles
+            .insert(TileCoord { x: tile.x, y: tile.y }, structure.clone());
+        new_tiles.push(structure);
+    }
+
+    if let Some(items) = inventory_items {
+        if let Some(sender) = state.clients.get(sid) {
+            let _ = sender.send(ServerMessage::Inventory { items });
+        }
+    }
+
+    let structures_public: Vec<StructurePublic> = new_tiles.iter().map(StructurePublic::from).collect();
+    broadcast_message_inline(
+        &state,
+        ServerMessage::StructureUpdate {
+            structures: structures_public,
+            state: "added".to_string(),
+        },
+    );
+    send_system_message(&mut state, &player_id, success_message.to_string());
+
+    let docs: Vec<StructureDoc> = new_tiles
+        .into_iter()
+        .map(|tile| StructureDoc {
+            id: structure_id as i64,
+            kind: tile.kind,
+            x: tile.x,
+            y: tile.y,
+            owner_id: tile.owner_id,
+        })
+        .collect();
+    let store = app_state.store.clone();
+    tokio::spawn(async move {
+        let _ = store.insert_structures(&docs).await;
+    });
+}
+
+async fn handle_demolish_request(app_state: &AppState, sid: &str, x: i32, y: i32) {
+    let mut state = app_state.state.write().await;
+    let player_id = match state.players.get(sid) {
+        Some(player) => player.id.clone(),
+        None => return,
+    };
+    let tile = TileCoord { x, y };
+    let structure = match state.structure_tiles.get(&tile) {
+        Some(structure) => structure.clone(),
+        None => {
+            send_system_message(&mut state, &player_id, "Nothing to remove.".to_string());
+            return;
+        }
+    };
+    if structure.owner_id != player_id {
+        send_system_message(
+            &mut state,
+            &player_id,
+            "You can only remove your own buildings.".to_string(),
+        );
+        return;
+    }
+
+    let target_id = structure.id;
+    let mut removed = Vec::new();
+    state
+        .structure_tiles
+        .retain(|_, structure| {
+            if structure.id == target_id {
+                removed.push(StructurePublic {
+                    id: structure.id,
+                    kind: structure.kind.clone(),
+                    x: structure.x,
+                    y: structure.y,
+                });
+                false
+            } else {
+                true
+            }
+        });
+
+    if removed.is_empty() {
+        return;
+    }
+
+    broadcast_message_inline(
+        &state,
+        ServerMessage::StructureUpdate {
+            structures: removed,
+            state: "removed".to_string(),
+        },
+    );
+    send_system_message(&mut state, &player_id, "Structure removed.".to_string());
+
+    let store = app_state.store.clone();
+    tokio::spawn(async move {
+        let _ = store.delete_structure_group(target_id as i64).await;
+    });
 }
 
 fn chunk_coord_for_position(x: f32, y: f32, chunk_size: i32) -> ChunkCoord {
@@ -382,6 +760,14 @@ fn chunk_coord_for_position(x: f32, y: f32, chunk_size: i32) -> ChunkCoord {
     ChunkCoord {
         x: (x / size).floor() as i32,
         y: (y / size).floor() as i32,
+    }
+}
+
+fn chunk_coord_for_tile(x: i32, y: i32, chunk_size: i32) -> ChunkCoord {
+    let size = chunk_size as f32;
+    ChunkCoord {
+        x: (x as f32 / size).floor() as i32,
+        y: (y as f32 / size).floor() as i32,
     }
 }
 
@@ -459,7 +845,15 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
         for id in player_ids {
             let input = state.inputs.get(&id).cloned().unwrap_or_default();
             if let Some(mut player) = state.players.remove(&id) {
-                update_player_movement(&mut player, input, &app_state.world, &app_state.noise, dt);
+                let prev_inventory_hash = player.last_inventory_hash;
+                update_player_movement(
+                    &mut player,
+                    input,
+                    &state.structure_tiles,
+                    &app_state.world,
+                    &app_state.noise,
+                    dt,
+                );
                 handle_player_actions(
                     &mut player,
                     input,
@@ -470,6 +864,14 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                     &app_state.data,
                 );
                 apply_player_regen(&mut player, now_ms);
+                let next_inventory_hash = inventory_hash(&player.inventory);
+                if next_inventory_hash != prev_inventory_hash {
+                    player.last_inventory_hash = next_inventory_hash;
+                    if let Some(sender) = state.clients.get(&id) {
+                        let items = build_inventory_items(&player.inventory, app_state.data.as_ref());
+                        let _ = sender.send(ServerMessage::Inventory { items });
+                    }
+                }
                 state.players.insert(id, player);
             }
         }
@@ -538,6 +940,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
 fn update_player_movement(
     player: &mut Player,
     input: InputState,
+    structure_tiles: &HashMap<TileCoord, StructureTile>,
     world: &WorldConfig,
     noise: &WorldNoise,
     dt: f32,
@@ -555,10 +958,10 @@ fn update_player_movement(
     let next_x = player.x + dx * PLAYER_SPEED * dt;
     let next_y = player.y + dy * PLAYER_SPEED * dt;
 
-    if can_walk(world, noise, next_x, player.y) {
+    if can_walk(structure_tiles, world, noise, next_x, player.y) {
         player.x = next_x;
     }
-    if can_walk(world, noise, player.x, next_y) {
+    if can_walk(structure_tiles, world, noise, player.x, next_y) {
         player.y = next_y;
     }
 }
@@ -670,6 +1073,7 @@ fn update_monsters(
     noise: &WorldNoise,
     data: &GameData,
 ) {
+    let structure_tiles = &state.structure_tiles;
     let player_positions: Vec<(String, f32, f32)> = state
         .players
         .values()
@@ -700,7 +1104,7 @@ fn update_monsters(
                     .find(|(id, _, _)| id == &target_id)
                     .map(|(_, x, y)| (*x, *y))
                     .unwrap_or((monster.x, monster.y));
-                move_towards(monster, tx, ty, def.speed, dt, world, noise);
+                move_towards(monster, tx, ty, def.speed, dt, structure_tiles, world, noise);
 
                 if nearest_dist <= MONSTER_ATTACK_RANGE
                     && now_ms - monster.last_attack_ms >= 800
@@ -709,10 +1113,10 @@ fn update_monsters(
                     monster.last_attack_ms = now_ms;
                 }
             } else {
-                wander(monster, now_ms, def.speed, dt, world, noise);
+                wander(monster, now_ms, def.speed, dt, structure_tiles, world, noise);
             }
         } else {
-            wander(monster, now_ms, def.speed, dt, world, noise);
+            wander(monster, now_ms, def.speed, dt, structure_tiles, world, noise);
         }
     }
 
@@ -782,6 +1186,13 @@ fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData) {
                 if let Some(respawn_at) = res.respawn_at_ms {
                     if now_ms >= respawn_at {
                         if let Some(def) = data.resources.get(&res.kind) {
+                            if state
+                                .structure_tiles
+                                .contains_key(&TileCoord { x: res.x, y: res.y })
+                            {
+                                res.respawn_at_ms = Some(now_ms + def.respawn_ms);
+                                continue;
+                            }
                             res.hp = def.hp;
                             res.respawn_at_ms = None;
                             respawned.push(ResourceNodePublic::from(res.clone()));
@@ -1112,12 +1523,140 @@ fn consume_item(inventory: &mut HashMap<String, i32>, item_id: &str, count: i32)
     true
 }
 
+fn inventory_hash(inventory: &HashMap<String, i32>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut entries: Vec<_> = inventory.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut hasher = DefaultHasher::new();
+    for (id, count) in entries {
+        id.hash(&mut hasher);
+        count.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn build_inventory_items(inventory: &HashMap<String, i32>, data: &GameData) -> Vec<InventoryItem> {
+    let mut items = Vec::new();
+    for (id, count) in inventory {
+        if *count <= 0 {
+            continue;
+        }
+        let (name, heal) = match data.items.get(id) {
+            Some(def) => (def.name.clone(), def.heal),
+            None => (id.clone(), None),
+        };
+        items.push(InventoryItem {
+            id: id.clone(),
+            name,
+            count: *count,
+            heal,
+        });
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    items
+}
+
+fn has_tool(inventory: &HashMap<String, i32>, data: &GameData, tool: &str) -> bool {
+    best_tool_power(inventory, data, tool).is_some()
+}
+
+fn resource_at_tile(state: &GameState, x: i32, y: i32) -> bool {
+    for resources in state.resources.values() {
+        for resource in resources {
+            if resource.hp > 0 && resource.x == x && resource.y == y {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn bridge_span_along_axis(
+    noise: &WorldNoise,
+    x: i32,
+    y: i32,
+    dx: i32,
+    dy: i32,
+) -> Option<Vec<TileCoord>> {
+    if tile_at(noise, x, y) != TILE_WATER {
+        return None;
+    }
+    let mut left_tiles = Vec::new();
+    let mut cx = x;
+    let mut cy = y;
+    let mut left_land = None;
+    for _ in 0..4 {
+        let nx = cx - dx;
+        let ny = cy - dy;
+        if tile_at(noise, nx, ny) == TILE_WATER {
+            left_tiles.push(TileCoord { x: nx, y: ny });
+            cx = nx;
+            cy = ny;
+        } else {
+            left_land = Some(TileCoord { x: nx, y: ny });
+            break;
+        }
+    }
+    if left_land.is_none() {
+        return None;
+    }
+
+    let mut right_tiles = Vec::new();
+    cx = x;
+    cy = y;
+    let mut right_land = None;
+    for _ in 0..4 {
+        let nx = cx + dx;
+        let ny = cy + dy;
+        if tile_at(noise, nx, ny) == TILE_WATER {
+            right_tiles.push(TileCoord { x: nx, y: ny });
+            cx = nx;
+            cy = ny;
+        } else {
+            right_land = Some(TileCoord { x: nx, y: ny });
+            break;
+        }
+    }
+    if right_land.is_none() {
+        return None;
+    }
+
+    let total_len = 1 + left_tiles.len() + right_tiles.len();
+    if total_len == 0 || total_len > 4 {
+        return None;
+    }
+
+    left_tiles.reverse();
+    let mut tiles = left_tiles;
+    tiles.push(TileCoord { x, y });
+    tiles.extend(right_tiles);
+    Some(tiles)
+}
+
+fn find_bridge_span(noise: &WorldNoise, x: i32, y: i32) -> Option<Vec<TileCoord>> {
+    let horizontal = bridge_span_along_axis(noise, x, y, 1, 0);
+    let vertical = bridge_span_along_axis(noise, x, y, 0, 1);
+    match (horizontal, vertical) {
+        (Some(h), Some(v)) => {
+            if h.len() >= v.len() {
+                Some(h)
+            } else {
+                Some(v)
+            }
+        }
+        (Some(h), None) => Some(h),
+        (None, Some(v)) => Some(v),
+        (None, None) => None,
+    }
+}
+
 fn move_towards(
     monster: &mut Monster,
     tx: f32,
     ty: f32,
     speed: f32,
     dt: f32,
+    structure_tiles: &HashMap<TileCoord, StructureTile>,
     world: &WorldConfig,
     noise: &WorldNoise,
 ) {
@@ -1129,10 +1668,10 @@ fn move_towards(
         let vy = dy / len * speed * dt;
         let next_x = monster.x + vx;
         let next_y = monster.y + vy;
-        if can_walk(world, noise, next_x, monster.y) {
+        if can_walk(structure_tiles, world, noise, next_x, monster.y) {
             monster.x = next_x;
         }
-        if can_walk(world, noise, monster.x, next_y) {
+        if can_walk(structure_tiles, world, noise, monster.x, next_y) {
             monster.y = next_y;
         }
     }
@@ -1143,6 +1682,7 @@ fn wander(
     now_ms: i64,
     speed: f32,
     dt: f32,
+    structure_tiles: &HashMap<TileCoord, StructureTile>,
     world: &WorldConfig,
     noise: &WorldNoise,
 ) {
@@ -1155,10 +1695,10 @@ fn wander(
     let (dx, dy) = monster.wander_dir;
     let next_x = monster.x + dx * speed * 0.4 * dt;
     let next_y = monster.y + dy * speed * 0.4 * dt;
-    if can_walk(world, noise, next_x, monster.y) {
+    if can_walk(structure_tiles, world, noise, next_x, monster.y) {
         monster.x = next_x;
     }
-    if can_walk(world, noise, monster.x, next_y) {
+    if can_walk(structure_tiles, world, noise, monster.x, next_y) {
         monster.y = next_y;
     }
 }
@@ -1176,8 +1716,22 @@ fn entity_foot_tile(x: f32, y: f32) -> (i32, i32) {
     )
 }
 
-fn can_walk(_world: &WorldConfig, noise: &WorldNoise, x: f32, y: f32) -> bool {
+fn can_walk(
+    structure_tiles: &HashMap<TileCoord, StructureTile>,
+    _world: &WorldConfig,
+    noise: &WorldNoise,
+    x: f32,
+    y: f32,
+) -> bool {
     let (tile_x, tile_y) = entity_foot_tile(x, y);
+    if let Some(structure) = structure_tiles.get(&TileCoord { x: tile_x, y: tile_y }) {
+        if structure.kind == "hut_wood" || structure.kind == "house_stone" {
+            return false;
+        }
+        if structure.kind.starts_with("bridge_") {
+            return true;
+        }
+    }
     tile_at(noise, tile_x, tile_y) != TILE_WATER
 }
 
@@ -1200,6 +1754,7 @@ fn generate_resources(
     world: &WorldConfig,
     noise: &WorldNoise,
     data: &GameData,
+    structure_tiles: &HashMap<TileCoord, StructureTile>,
 ) -> Vec<ResourceNode> {
     let chunk_size = world.chunk_size;
     let mut resources = Vec::new();
@@ -1211,17 +1766,45 @@ fn generate_resources(
             if tile == TILE_WATER {
                 continue;
             }
+            if structure_tiles.contains_key(&TileCoord { x: wx, y: wy }) {
+                continue;
+            }
             let elevation = noise.elevation(wx as f32, wy as f32);
             let moisture = noise.moisture(wx as f32, wy as f32);
             let tree_density = noise.tree_density(wx as f32, wy as f32);
             let rock_density = noise.rock_density(wx as f32, wy as f32);
 
+            let is_grass = tile == TILE_GRASS || tile == TILE_FLOWER;
+            let is_dirt = tile == TILE_DIRT;
+            let is_sand = tile == TILE_SAND;
+
             let mut kind = None;
-            if tile == TILE_GRASS || tile == TILE_DIRT {
+            if is_grass {
                 let tree_score = tree_density + moisture * 0.25;
                 let tree_roll = noise_hash01(seed, wx, wy);
                 if tree_score > 0.25 && tree_roll < (tree_score * 0.45 + 0.1) {
-                    kind = Some("tree");
+                    let apple_roll = noise_hash01(seed.wrapping_add(1337), wx, wy);
+                    if apple_roll > 0.82 {
+                        kind = Some("apple_tree");
+                    } else {
+                        kind = Some("tree");
+                    }
+                }
+            }
+
+            if kind.is_none() && is_dirt {
+                let tree_score = tree_density + moisture * 0.2;
+                let tree_roll = noise_hash01(seed.wrapping_add(77), wx, wy);
+                if tree_score > 0.22 && tree_roll < (tree_score * 0.5 + 0.08) {
+                    kind = Some("pine_tree");
+                }
+            }
+
+            if kind.is_none() && is_sand {
+                let palm_score = tree_density + moisture * 0.2;
+                let palm_roll = noise_hash01(seed.wrapping_add(4242), wx, wy);
+                if palm_score > 0.15 && palm_roll < (palm_score * 0.35 + 0.05) {
+                    kind = Some("palm_tree");
                 }
             }
 
@@ -1279,12 +1862,12 @@ fn spawn_monsters_for_chunk(
             monster_id,
             Monster {
                 id: monster_id,
-                kind: "slime".to_string(),
+                kind: "boar".to_string(),
                 x: wx as f32 + 0.5,
                 y: wy as f32 + 0.5,
                 hp: data
                     .monsters
-                    .get("slime")
+                    .get("boar")
                     .map(|m| m.hp)
                     .unwrap_or(6),
                 target: None,
@@ -1315,7 +1898,12 @@ fn tile_at(noise: &WorldNoise, x: i32, y: i32) -> u8 {
     } else if soil > 0.45 && moisture > -0.2 {
         TILE_DIRT
     } else {
-        TILE_GRASS
+        let flower_score = noise.flower_density(x as f32, y as f32) + moisture * 0.2;
+        if flower_score > 0.35 {
+            TILE_FLOWER
+        } else {
+            TILE_GRASS
+        }
     }
 }
 
@@ -1384,6 +1972,7 @@ fn default_player_doc(id: &str, world: &WorldConfig, noise: &WorldNoise) -> Play
     let mut inventory = HashMap::new();
     inventory.insert("basic_axe".to_string(), 1);
     inventory.insert("basic_pick".to_string(), 1);
+    inventory.insert("basic_shovel".to_string(), 1);
     inventory.insert("rusty_sword".to_string(), 1);
     let (spawn_x, spawn_y) = safe_spawn(world, noise);
     PlayerDoc {
@@ -1467,6 +2056,7 @@ fn broadcast_message_inline(state: &GameState, msg: ServerMessage) {
 #[derive(Clone)]
 struct GameStore {
     players: Collection<PlayerDoc>,
+    structures: Collection<StructureDoc>,
 }
 
 impl GameStore {
@@ -1475,6 +2065,7 @@ impl GameStore {
         let db = client.database("onlinerpg");
         Ok(Self {
             players: db.collection::<PlayerDoc>("players"),
+            structures: db.collection::<StructureDoc>("structures"),
         })
     }
 
@@ -1504,6 +2095,28 @@ impl GameStore {
             .await?;
         Ok(())
     }
+
+    async fn load_structures(&self) -> AppResult<Vec<StructureDoc>> {
+        let mut cursor = self.structures.find(doc! {}, None).await?;
+        let mut docs = Vec::new();
+        while let Some(result) = cursor.next().await {
+            docs.push(result?);
+        }
+        Ok(docs)
+    }
+
+    async fn insert_structures(&self, structures: &[StructureDoc]) -> AppResult<()> {
+        if structures.is_empty() {
+            return Ok(());
+        }
+        self.structures.insert_many(structures, None).await?;
+        Ok(())
+    }
+
+    async fn delete_structure_group(&self, id: i64) -> AppResult<()> {
+        self.structures.delete_many(doc! { "id": id }, None).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1525,11 +2138,13 @@ struct GameState {
     monsters: HashMap<u64, Monster>,
     projectiles: HashMap<u64, Projectile>,
     resources: HashMap<ChunkCoord, Vec<ResourceNode>>,
+    structure_tiles: HashMap<TileCoord, StructureTile>,
     spawned_chunks: HashSet<ChunkCoord>,
     chunk_last_access: HashMap<ChunkCoord, i64>,
     clients: HashMap<String, mpsc::UnboundedSender<ServerMessage>>,
     typing: HashMap<String, i64>,
     next_entity_id: u64,
+    next_structure_id: u64,
 }
 
 impl GameState {
@@ -1540,17 +2155,25 @@ impl GameState {
             monsters: HashMap::new(),
             projectiles: HashMap::new(),
             resources: HashMap::new(),
+            structure_tiles: HashMap::new(),
             spawned_chunks: HashSet::new(),
             chunk_last_access: HashMap::new(),
             clients: HashMap::new(),
             typing: HashMap::new(),
             next_entity_id: 1,
+            next_structure_id: 1,
         }
     }
 
     fn next_id(&mut self) -> u64 {
         let id = self.next_entity_id;
         self.next_entity_id += 1;
+        id
+    }
+
+    fn next_structure_id(&mut self) -> u64 {
+        let id = self.next_structure_id;
+        self.next_structure_id += 1;
         id
     }
 }
@@ -1571,10 +2194,12 @@ struct Player {
     last_interact_ms: i64,
     last_regen_ms: i64,
     last_saved_ms: i64,
+    last_inventory_hash: u64,
 }
 
 impl Player {
     fn from_doc(doc: PlayerDoc) -> Self {
+        let inventory_hash = inventory_hash(&doc.inventory);
         Self {
             id: doc.id,
             name: doc.name,
@@ -1590,6 +2215,7 @@ impl Player {
             last_interact_ms: 0,
             last_regen_ms: now_millis(),
             last_saved_ms: now_millis(),
+            last_inventory_hash: inventory_hash,
         }
     }
 
@@ -1600,6 +2226,7 @@ impl Player {
         self.hp = doc.hp;
         self.inventory = doc.inventory.clone();
         self.completed_quests = doc.completed_quests.iter().cloned().collect();
+        self.last_inventory_hash = inventory_hash(&self.inventory);
     }
 
     fn to_doc(&self) -> PlayerDoc {
@@ -1687,6 +2314,38 @@ struct ChunkCoord {
     y: i32,
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+struct TileCoord {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Clone)]
+struct StructureTile {
+    id: u64,
+    kind: String,
+    x: i32,
+    y: i32,
+    owner_id: String,
+}
+
+#[derive(Clone, Serialize)]
+struct StructurePublic {
+    id: u64,
+    kind: String,
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StructureDoc {
+    id: i64,
+    kind: String,
+    x: i32,
+    y: i32,
+    owner_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WeaponStats {
     kind: String,
@@ -1703,6 +2362,7 @@ struct ItemDef {
     kind: String,
     tool: Option<String>,
     power: Option<i32>,
+    heal: Option<i32>,
     weapon: Option<WeaponStats>,
     ammo_for: Option<String>,
 }
@@ -1762,6 +2422,7 @@ struct WorldNoise {
     river: Perlin,
     tree: Perlin,
     rock: Perlin,
+    flowers: Perlin,
 }
 
 impl WorldNoise {
@@ -1774,6 +2435,7 @@ impl WorldNoise {
             river: Perlin::new(base.wrapping_add(41)),
             tree: Perlin::new(base.wrapping_add(59)),
             rock: Perlin::new(base.wrapping_add(71)),
+            flowers: Perlin::new(base.wrapping_add(83)),
         }
     }
 
@@ -1801,6 +2463,10 @@ impl WorldNoise {
         self.fbm(&self.rock, x, y, 0.06, 2)
     }
 
+    fn flower_density(&self, x: f32, y: f32) -> f32 {
+        self.fbm(&self.flowers, x, y, 0.08, 3)
+    }
+
     fn fbm(&self, perlin: &Perlin, x: f32, y: f32, base_freq: f64, octaves: i32) -> f32 {
         let mut freq = base_freq;
         let mut amp = 0.5;
@@ -1825,6 +2491,14 @@ impl WorldNoise {
 struct ItemStack {
     id: String,
     count: i32,
+}
+
+#[derive(Clone, Serialize)]
+struct InventoryItem {
+    id: String,
+    name: String,
+    count: i32,
+    heal: Option<i32>,
 }
 
 #[derive(Clone)]
@@ -1969,6 +2643,17 @@ impl From<&ResourceNode> for ResourceNodePublic {
     }
 }
 
+impl From<&StructureTile> for StructurePublic {
+    fn from(structure: &StructureTile) -> Self {
+        Self {
+            id: structure.id,
+            kind: structure.kind.clone(),
+            x: structure.x,
+            y: structure.y,
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct NpcPublic {
     id: String,
@@ -2015,12 +2700,14 @@ enum ServerMessage {
         player: PlayerSelf,
         world: WorldConfig,
         npcs: Vec<NpcPublic>,
+        inventory_items: Vec<InventoryItem>,
     },
     ChunkData {
         chunk_x: i32,
         chunk_y: i32,
         tiles: Vec<u8>,
         resources: Vec<ResourceNodePublic>,
+        structures: Vec<StructurePublic>,
     },
     State {
         players: Vec<PlayerPublic>,
@@ -2030,6 +2717,13 @@ enum ServerMessage {
     ResourceUpdate {
         resource: ResourceNodePublic,
         state: String,
+    },
+    StructureUpdate {
+        structures: Vec<StructurePublic>,
+        state: String,
+    },
+    Inventory {
+        items: Vec<InventoryItem>,
     },
     Chat {
         from: String,
@@ -2063,6 +2757,18 @@ enum ClientMessage {
     },
     SetName {
         name: String,
+    },
+    UseItem {
+        id: String,
+    },
+    Build {
+        kind: String,
+        x: i32,
+        y: i32,
+    },
+    Demolish {
+        x: i32,
+        y: i32,
     },
     Typing {
         typing: bool,
