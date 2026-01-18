@@ -4,8 +4,13 @@
   const chatInput = document.getElementById('chat-input');
   const nameInput = document.getElementById('name-input');
   const nameSave = document.getElementById('name-save');
+  const chatToggleLocal = document.getElementById('chat-toggle-local');
+  const chatToggleLocalLabel = document.getElementById('chat-toggle-local-label');
+  const communityLeaveButton = document.getElementById('community-leave');
   const inventoryList = document.getElementById('inventory-list');
   const inventoryPanel = document.getElementById('inventory');
+  const storagePanel = document.getElementById('storage');
+  const storageList = document.getElementById('storage-list');
   const buildMenu = document.getElementById('build-menu');
   const hudEl = document.getElementById('hud');
   const buildStatus = document.getElementById('build-status');
@@ -17,6 +22,11 @@
   const dialogEl = document.getElementById('dialog');
   const dialogTitle = document.getElementById('dialog-title');
   const dialogText = document.getElementById('dialog-text');
+  const approvalDialog = document.getElementById('approval-dialog');
+  const approvalTitle = document.getElementById('approval-title');
+  const approvalText = document.getElementById('approval-text');
+  const approvalAccept = document.getElementById('approval-accept');
+  const approvalDecline = document.getElementById('approval-decline');
   const helpEl = document.getElementById('help');
   const fullscreenButton = document.getElementById('fullscreen-toggle');
   const joystickEl = document.getElementById('touch-joystick');
@@ -60,6 +70,9 @@
       buildOptionBridgeStone: 'Stone Bridge (20 stone)',
       buildOptionPath: 'Path (shovel)',
       buildOptionRoad: 'Road (2 stone + shovel)',
+      buildOptionCastle: 'Castle (10 members)',
+      buildOptionSilo: 'Silo (2 members)',
+      buildOptionChurch: 'Church (3 members)',
       buildOptionDemolish: 'Demolish',
       actionAttack: 'Attack',
       actionGather: 'Gather',
@@ -67,6 +80,16 @@
       helpTouch: 'Touch: drag screen or joystick to move · Tap Attack/Gather/Interact · Tap chat to type',
       inventoryEmpty: 'Empty',
       inventoryEat: 'Click to eat',
+      inventoryDeposit: 'Click to store (Shift = store)',
+      storageTitle: 'Storage',
+      storageEmpty: 'Empty storage',
+      storageWithdraw: 'Click to withdraw',
+      chatToggleLocal: 'Local chat',
+      chatToggleLocalAria: 'Toggle local chat',
+      communityLeave: 'Leave community',
+      communityLeaveAria: 'Leave community',
+      approvalAccept: 'Approve',
+      approvalDecline: 'Decline',
       hpLabel: 'HP',
     },
     de: {
@@ -103,6 +126,9 @@
       buildOptionBridgeStone: 'Steinbrücke (20 Stein)',
       buildOptionPath: 'Pfad (Schaufel)',
       buildOptionRoad: 'Straße (2 Stein + Schaufel)',
+      buildOptionCastle: 'Schloss (10 Mitglieder)',
+      buildOptionSilo: 'Lagerhaus (2 Mitglieder)',
+      buildOptionChurch: 'Kirche (3 Mitglieder)',
       buildOptionDemolish: 'Abriss',
       actionAttack: 'Angriff',
       actionGather: 'Sammeln',
@@ -110,6 +136,16 @@
       helpTouch: 'Touch: Bildschirm oder Joystick ziehen zum Laufen · Angriff/Sammeln/Interagieren tippen · Chat zum Tippen antippen',
       inventoryEmpty: 'Leer',
       inventoryEat: 'Klicken zum Essen',
+      inventoryDeposit: 'Klicken zum Einlagern (Shift = einlagern)',
+      storageTitle: 'Lagerhaus',
+      storageEmpty: 'Lager leer',
+      storageWithdraw: 'Klicken zum Entnehmen',
+      chatToggleLocal: 'Lokaler Chat',
+      chatToggleLocalAria: 'Lokalen Chat umschalten',
+      communityLeave: 'Gemeinschaft verlassen',
+      communityLeaveAria: 'Gemeinschaft verlassen',
+      approvalAccept: 'Zustimmen',
+      approvalDecline: 'Ablehnen',
       hpLabel: 'HP',
     },
   };
@@ -181,8 +217,14 @@
     'assets/entities/rock-large.svg',
     'assets/entities/hut-wood.svg',
     'assets/entities/house-stone.svg',
+    'assets/entities/castle.svg',
+    'assets/entities/silo.svg',
+    'assets/entities/church.svg',
     'assets/entities/bridge-wood.svg',
     'assets/entities/bridge-stone.svg',
+    'assets/entities/fence-wood.svg',
+    'assets/entities/float-wood.svg',
+    'assets/entities/well.svg',
     'assets/entities/path.svg',
     'assets/entities/road.svg',
     'assets/entities/tent.svg',
@@ -275,6 +317,12 @@
   let lastKnownName = '';
   let nameStyle = null;
   let pendingName = null;
+  let showLocalChat = true;
+  let activeStorageId = null;
+  let storageItems = [];
+  const pendingApprovals = [];
+  let activeApproval = null;
+  let lastInventoryItems = [];
   let buildMode = null;
   let pendingDemolish = null;
   let buildPreviewSprite = null;
@@ -303,6 +351,14 @@
     const chatTitle = document.querySelector('#chat .panel-title');
     if (chatTitle) {
       chatTitle.textContent = t('panelChat');
+    }
+    if (chatToggleLocalLabel) {
+      chatToggleLocalLabel.textContent = t('chatToggleLocal');
+    }
+    if (communityLeaveButton) {
+      communityLeaveButton.textContent = t('communityLeave');
+      communityLeaveButton.setAttribute('aria-label', t('communityLeaveAria'));
+      communityLeaveButton.setAttribute('title', t('communityLeaveAria'));
     }
     const inventoryToggle = document.querySelector('[data-panel="inventory"]');
     if (inventoryToggle) {
@@ -345,6 +401,10 @@
     if (chatInput) {
       chatInput.placeholder = t('chatPlaceholder');
     }
+    const storageTitle = storagePanel?.querySelector('.panel-title');
+    if (storageTitle) {
+      storageTitle.textContent = t('storageTitle');
+    }
     if (buildStatus) {
       buildStatus.textContent = t('buildStatusSelect');
     }
@@ -355,6 +415,9 @@
       bridge_stone: t('buildOptionBridgeStone'),
       path: t('buildOptionPath'),
       road: t('buildOptionRoad'),
+      castle: t('buildOptionCastle'),
+      silo: t('buildOptionSilo'),
+      church: t('buildOptionChurch'),
       demolish: t('buildOptionDemolish'),
     };
     buildButtons.forEach((button) => {
@@ -380,6 +443,20 @@
           break;
       }
     });
+  }
+
+  function setShowLocalChat(value) {
+    showLocalChat = Boolean(value);
+    if (chatToggleLocal) {
+      chatToggleLocal.checked = showLocalChat;
+      chatToggleLocal.setAttribute('aria-label', t('chatToggleLocalAria'));
+      chatToggleLocal.setAttribute('title', t('chatToggleLocalAria'));
+    }
+    try {
+      localStorage.setItem('chat-show-local', showLocalChat ? '1' : '0');
+    } catch (err) {
+      console.warn('Chat filter save failed', err);
+    }
   }
 
   function worldToPixels(x, y) {
@@ -449,6 +526,35 @@
     }
   }
 
+  function updateCommunityMarker(entity, enabled) {
+    if (!enabled) {
+      if (entity.communityMarker) {
+        if (entity.communityMarker.parent) {
+          entity.communityMarker.parent.removeChild(entity.communityMarker);
+        }
+        entity.communityMarker.destroy();
+        entity.communityMarker = null;
+      }
+      return;
+    }
+    if (!entity.communityMarker) {
+      const marker = new PIXI.Graphics();
+      marker.alpha = 0.8;
+      overlayLayer.addChild(marker);
+      entity.communityMarker = marker;
+    }
+    const marker = entity.communityMarker;
+    const markerSize = tileSize * 0.3;
+    if (marker._size !== markerSize) {
+      marker.clear();
+      marker.beginFill(0x7ad5a3, 0.45);
+      marker.lineStyle(1, 0x1f4f3a, 0.8);
+      marker.drawEllipse(0, 0, markerSize, markerSize * 0.4);
+      marker.endFill();
+      marker._size = markerSize;
+    }
+  }
+
   function submitNameChange() {
     if (!nameInput) return;
     const normalized = normalizeNameInput(nameInput.value);
@@ -481,10 +587,27 @@
     }
   }
 
+  function addChatMessage(message) {
+    if (!message) return;
+    const channel = message.channel || 'local';
+    if (channel === 'local' && !showLocalChat) {
+      return;
+    }
+    const classes = [];
+    if (channel === 'community') {
+      classes.push('community');
+    }
+    if (message.community_member) {
+      classes.push('community-member');
+    }
+    addChat(`${message.from}: ${message.text}`, classes.join(' '));
+  }
+
   function renderInventory(items) {
     if (!inventoryList) return;
     const previousScrollTop = inventoryList.scrollTop;
     const shouldStick = inventoryList.scrollTop + inventoryList.clientHeight >= inventoryList.scrollHeight - 8;
+    const storageActive = activeStorageId != null;
     while (inventoryList.firstChild) {
       inventoryList.removeChild(inventoryList.firstChild);
     }
@@ -509,9 +632,31 @@
         row.classList.add('is-usable');
         row.setAttribute('role', 'button');
         row.setAttribute('tabindex', '0');
-        row.title = t('inventoryEat');
-        row.addEventListener('click', () => {
+        row.title = storageActive ? t('inventoryDeposit') : t('inventoryEat');
+        row.addEventListener('click', (event) => {
+          if (storageActive && event.shiftKey) {
+            sendMessage({
+              type: 'storage_deposit',
+              storage_id: activeStorageId,
+              item_id: item.id,
+              count: 1,
+            });
+            return;
+          }
           sendMessage({ type: 'use_item', id: item.id });
+        });
+      } else if (storageActive) {
+        row.classList.add('is-deposit');
+        row.setAttribute('role', 'button');
+        row.setAttribute('tabindex', '0');
+        row.title = t('inventoryDeposit');
+        row.addEventListener('click', () => {
+          sendMessage({
+            type: 'storage_deposit',
+            storage_id: activeStorageId,
+            item_id: item.id,
+            count: 1,
+          });
         });
       }
       inventoryList.appendChild(row);
@@ -520,6 +665,51 @@
       inventoryList.scrollTop = inventoryList.scrollHeight;
     } else {
       inventoryList.scrollTop = Math.min(previousScrollTop, inventoryList.scrollHeight);
+    }
+  }
+
+  function renderStorage(items) {
+    if (!storageList) return;
+    const previousScrollTop = storageList.scrollTop;
+    const shouldStick = storageList.scrollTop + storageList.clientHeight >= storageList.scrollHeight - 8;
+    while (storageList.firstChild) {
+      storageList.removeChild(storageList.firstChild);
+    }
+    if (!items || items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = t('storageEmpty');
+      storageList.appendChild(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'storage-item';
+      const nameEl = document.createElement('span');
+      nameEl.textContent = item.name;
+      const countEl = document.createElement('span');
+      countEl.className = 'count';
+      countEl.textContent = `x${item.count}`;
+      row.appendChild(nameEl);
+      row.appendChild(countEl);
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.title = t('storageWithdraw');
+      row.addEventListener('click', () => {
+        if (!activeStorageId) return;
+        sendMessage({
+          type: 'storage_withdraw',
+          storage_id: activeStorageId,
+          item_id: item.id,
+          count: 1,
+        });
+      });
+      storageList.appendChild(row);
+    });
+    if (shouldStick) {
+      storageList.scrollTop = storageList.scrollHeight;
+    } else {
+      storageList.scrollTop = Math.min(previousScrollTop, storageList.scrollHeight);
     }
   }
 
@@ -688,6 +878,11 @@
             if (panelId === 'inventory') {
               updateBuildMenuPosition();
             }
+            if (panelId === 'storage' && state.collapsed) {
+              activeStorageId = null;
+              renderStorage([]);
+              renderInventory(lastInventoryItems);
+            }
             return;
           }
         });
@@ -702,6 +897,11 @@
     const gap = 12;
     const nextTop = Math.round(inventoryRect.bottom - hudRect.top + gap);
     buildMenu.style.top = `${nextTop}px`;
+    if (storagePanel) {
+      const buildRect = buildMenu.getBoundingClientRect();
+      const storageTop = Math.round(buildRect.bottom - hudRect.top + gap);
+      storagePanel.style.top = `${storageTop}px`;
+    }
   }
 
   function setUiScale(value) {
@@ -822,6 +1022,39 @@
     dialogTimer = setTimeout(() => {
       dialogEl.classList.add('hidden');
     }, 5000);
+  }
+
+  function enqueueApproval(request) {
+    if (!request) return;
+    pendingApprovals.push(request);
+    if (!activeApproval) {
+      showNextApproval();
+    }
+  }
+
+  function showNextApproval() {
+    if (!approvalDialog) return;
+    activeApproval = pendingApprovals.shift() || null;
+    if (!activeApproval) {
+      approvalDialog.classList.add('hidden');
+      return;
+    }
+    approvalTitle.textContent = activeApproval.title || 'Approval';
+    approvalText.textContent = activeApproval.text || '';
+    approvalAccept.textContent = activeApproval.accept || t('approvalAccept');
+    approvalDecline.textContent = activeApproval.decline || t('approvalDecline');
+    approvalDialog.classList.remove('hidden');
+  }
+
+  function respondToApproval(approve) {
+    if (!activeApproval) return;
+    sendMessage({
+      type: 'community_approval',
+      request_id: activeApproval.request_id,
+      approve,
+    });
+    activeApproval = null;
+    showNextApproval();
   }
 
   function getFullscreenElement() {
@@ -1049,6 +1282,9 @@
     const tileY = Math.floor(y);
     const structureKind = structureTiles.get(tileKey(tileX, tileY));
     if (structureKind) {
+      if (structureKind === 'community_float') {
+        return true;
+      }
       if (structureKind.startsWith('bridge_')) {
         return true;
       }
@@ -1108,8 +1344,14 @@
     'bridge_stone',
     'bridge_stone_h',
     'bridge_stone_v',
+    'community_fence',
+    'community_float',
+    'community_well',
     'hut_wood_root',
     'house_stone_root',
+    'castle_root',
+    'silo_root',
+    'church_root',
   ]);
   const renderlessStructureKinds = new Set([
     'hut_wood_fill',
@@ -1118,6 +1360,9 @@
     'hut_wood_top',
     'house_stone_block',
     'house_stone_top',
+    'castle_fill',
+    'silo_fill',
+    'church_fill',
   ]);
   const blockingStructureKinds = new Set([
     'hut_wood',
@@ -1126,10 +1371,24 @@
     'house_stone',
     'house_stone_root',
     'house_stone_block',
+    'castle_root',
+    'castle_fill',
+    'silo_root',
+    'silo_fill',
+    'church_root',
+    'church_fill',
+    'community_fence',
+    'community_well',
   ]);
   const structureFootprints = new Map([
     ['hut_wood_root', { width: 2, height: 2 }],
     ['house_stone_root', { width: 3, height: 3 }],
+    ['castle_root', { width: 8, height: 8 }],
+    ['castle', { width: 8, height: 8 }],
+    ['silo_root', { width: 3, height: 3 }],
+    ['silo', { width: 3, height: 3 }],
+    ['church_root', { width: 5, height: 5 }],
+    ['church', { width: 5, height: 5 }],
   ]);
 
   function baseStructureKind(kind) {
@@ -1262,10 +1521,17 @@
           localPrediction.x = player.x;
           localPrediction.y = player.y;
         }
+        if (communityLeaveButton) {
+          communityLeaveButton.classList.toggle('hidden', !player.community_id);
+        }
       } else if (entity) {
         updateEntityTarget(entity, player.x, player.y, now);
       }
       ensurePlayerLabel(entity, player.name);
+      const localCommunityId = playerState?.community_id;
+      const isCommunityMember =
+        localCommunityId && player.community_id && localCommunityId === player.community_id;
+      updateCommunityMarker(entity, Boolean(isCommunityMember));
       entity.hp = player.hp;
     });
 
@@ -1488,8 +1754,14 @@
     textures.rockLarge = PIXI.Texture.from('assets/entities/rock-large.svg');
     textures.hut_wood = PIXI.Texture.from('assets/entities/hut-wood.svg');
     textures.house_stone = PIXI.Texture.from('assets/entities/house-stone.svg');
+    textures.castle = PIXI.Texture.from('assets/entities/castle.svg');
+    textures.silo = PIXI.Texture.from('assets/entities/silo.svg');
+    textures.church = PIXI.Texture.from('assets/entities/church.svg');
     textures.bridge_wood = PIXI.Texture.from('assets/entities/bridge-wood.svg');
     textures.bridge_stone = PIXI.Texture.from('assets/entities/bridge-stone.svg');
+    textures.community_fence = PIXI.Texture.from('assets/entities/fence-wood.svg');
+    textures.community_float = PIXI.Texture.from('assets/entities/float-wood.svg');
+    textures.community_well = PIXI.Texture.from('assets/entities/well.svg');
     textures.path = PIXI.Texture.from('assets/entities/path.svg');
     textures.road = PIXI.Texture.from('assets/entities/road.svg');
     textures.tent = PIXI.Texture.from('assets/entities/tent.svg');
@@ -1551,6 +1823,7 @@
       walkOffset: Math.random() * Math.PI * 2,
       label: options.label ?? null,
       name: options.name ?? null,
+      communityMarker: options.communityMarker ?? null,
     };
   }
 
@@ -1644,6 +1917,13 @@
         entity.label.parent.removeChild(entity.label);
       }
       entity.label.destroy();
+    }
+    if (entity.communityMarker) {
+      if (entity.communityMarker.parent) {
+        entity.communityMarker.parent.removeChild(entity.communityMarker);
+      }
+      entity.communityMarker.destroy();
+      entity.communityMarker = null;
     }
   }
 
@@ -1784,6 +2064,11 @@
           entity.label.y = baseY + tileSize * 0.2;
           entity.label.zIndex = baseY + tileSize * 0.2;
         }
+        if (entity.communityMarker) {
+          entity.communityMarker.x = basePos.x;
+          entity.communityMarker.y = baseY + tileSize * 0.65;
+          entity.communityMarker.zIndex = baseY - 2;
+        }
         continue;
       }
       const t = alpha(entity.startTime);
@@ -1799,6 +2084,11 @@
         entity.label.x = basePos.x;
         entity.label.y = baseY + tileSize * 0.2;
         entity.label.zIndex = baseY + tileSize * 0.2;
+      }
+      if (entity.communityMarker) {
+        entity.communityMarker.x = basePos.x;
+        entity.communityMarker.y = baseY + tileSize * 0.65;
+        entity.communityMarker.zIndex = baseY - 2;
       }
     }
 
@@ -1848,6 +2138,7 @@
           addCampfireAndTent(msg.world);
           refreshNameStyle();
           if (msg.inventory_items) {
+            lastInventoryItems = msg.inventory_items;
             renderInventory(msg.inventory_items);
           }
           msg.npcs.forEach((npc) => addNpc(npc));
@@ -1895,15 +2186,30 @@
           break;
         }
         case 'inventory': {
-          renderInventory(msg.items);
+          lastInventoryItems = msg.items || [];
+          renderInventory(lastInventoryItems);
+          break;
+        }
+        case 'storage': {
+          activeStorageId = msg.storage_id;
+          storageItems = msg.items || [];
+          if (storagePanel) {
+            storagePanel.classList.remove('collapsed');
+          }
+          renderStorage(storageItems);
+          renderInventory(lastInventoryItems);
           break;
         }
         case 'chat': {
-          addChat(`${msg.from}: ${msg.text}`);
+          addChatMessage(msg);
           break;
         }
         case 'system': {
           addChat(msg.text, 'system');
+          break;
+        }
+        case 'approval_request': {
+          enqueueApproval(msg);
           break;
         }
         case 'typing': {
@@ -1957,6 +2263,30 @@
           setBuildMode(mode);
         }
       });
+    });
+  }
+
+  if (chatToggleLocal) {
+    chatToggleLocal.addEventListener('change', (event) => {
+      setShowLocalChat(event.target.checked);
+    });
+  }
+
+  if (communityLeaveButton) {
+    communityLeaveButton.addEventListener('click', () => {
+      sendMessage({ type: 'community_leave' });
+    });
+  }
+
+  if (approvalAccept) {
+    approvalAccept.addEventListener('click', () => {
+      respondToApproval(true);
+    });
+  }
+
+  if (approvalDecline) {
+    approvalDecline.addEventListener('click', () => {
+      respondToApproval(false);
     });
   }
 
@@ -2207,12 +2537,26 @@
   if (inventoryPanel) {
     inventoryPanel.classList.add('collapsed');
   }
+  if (storagePanel) {
+    storagePanel.classList.add('collapsed');
+  }
   if (buildMenu) {
     buildMenu.classList.add('collapsed');
   }
   setupPanelControls('inventory');
   setupPanelControls('chat');
   setupPanelControls('build-menu');
+  setupPanelControls('storage');
+  let savedChatLocal = true;
+  try {
+    const raw = localStorage.getItem('chat-show-local');
+    if (raw === '0') {
+      savedChatLocal = false;
+    }
+  } catch (err) {
+    console.warn('Chat filter load failed', err);
+  }
+  setShowLocalChat(savedChatLocal);
   let savedScale = 1;
   try {
     const raw = localStorage.getItem('ui-scale');

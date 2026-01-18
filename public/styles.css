@@ -215,6 +215,46 @@ canvas {
   pointer-events: auto;
 }
 
+#approval-dialog {
+  position: absolute;
+  left: 20px;
+  bottom: 290px;
+  width: 320px;
+  padding: 14px 16px;
+  font-size: 20px;
+  line-height: 1.2;
+  pointer-events: auto;
+}
+
+#approval-title {
+  font-family: "Press Start 2P", cursive;
+  font-size: 12px;
+  margin-bottom: 6px;
+  color: var(--accent);
+}
+
+#approval-text {
+  color: var(--text);
+  white-space: pre-line;
+  margin-bottom: 12px;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.approval-actions button {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 12, 16, 0.7);
+  color: var(--text);
+  font-family: "VT323", monospace;
+  font-size: 16px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
 #dialog-title {
   font-family: "Press Start 2P", cursive;
   font-size: 12px;
@@ -236,6 +276,15 @@ canvas {
   pointer-events: auto;
 }
 
+#storage {
+  position: absolute;
+  left: 20px;
+  top: 380px;
+  width: 220px;
+  padding: 12px;
+  pointer-events: auto;
+}
+
 .panel-title {
   font-family: "Press Start 2P", cursive;
   font-size: 10px;
@@ -244,6 +293,15 @@ canvas {
 }
 
 #inventory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: clamp(140px, 30vh, 240px);
+  overflow-y: auto;
+  font-size: 18px;
+}
+
+#storage-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -262,6 +320,21 @@ canvas {
   color: var(--text);
 }
 
+.storage-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.storage-item .count {
+  color: var(--text-muted);
+}
+
 .inventory-item .count {
   color: var(--text-muted);
 }
@@ -272,11 +345,28 @@ canvas {
   cursor: pointer;
 }
 
+.inventory-item.is-deposit {
+  border-color: rgba(240, 211, 132, 0.45);
+  background: rgba(10, 12, 16, 0.6);
+  cursor: pointer;
+}
+
+.inventory-item.is-usable:hover,
+.inventory-item.is-deposit:hover,
+.storage-item:hover {
+  background: rgba(122, 213, 163, 0.12);
+}
+
 .inventory-item.is-usable:active {
   transform: translateY(1px);
 }
 
 #inventory-list .empty {
+  color: var(--text-muted);
+  font-size: 16px;
+}
+
+#storage-list .empty {
   color: var(--text-muted);
   font-size: 16px;
 }
@@ -352,6 +442,26 @@ canvas {
 
 #chat-log .system {
   color: var(--accent-2);
+}
+
+#chat-log .community {
+  color: #7ad5ff;
+}
+
+#chat-log .community-member {
+  color: #7ad5a3;
+}
+
+.chat-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.chat-toggle input {
+  accent-color: var(--accent);
 }
 
 .field-row {

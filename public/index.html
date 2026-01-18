@@ -29,6 +29,15 @@
       <div id="dialog-text"></div>
     </div>
 
+    <div id="approval-dialog" class="panel hidden ui-scale origin-bottom-left">
+      <div id="approval-title"></div>
+      <div id="approval-text"></div>
+      <div class="approval-actions">
+        <button id="approval-accept" type="button">Approve</button>
+        <button id="approval-decline" type="button">Decline</button>
+      </div>
+    </div>
+
     <div id="inventory" class="panel ui-scale origin-top-left">
       <div class="panel-header">
         <div class="panel-title">Inventory</div>
@@ -42,6 +51,22 @@
       </div>
       <div class="panel-body">
         <div id="inventory-list"></div>
+      </div>
+    </div>
+
+    <div id="storage" class="panel ui-scale origin-top-left collapsed">
+      <div class="panel-header">
+        <div class="panel-title">Storage</div>
+        <div class="panel-controls">
+          <button class="panel-btn panel-toggle" data-panel="storage" data-action="toggle" type="button" aria-label="Toggle storage" title="Toggle storage">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="square" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="storage-list"></div>
       </div>
     </div>
 
@@ -64,6 +89,9 @@
         <button class="build-btn" data-build="bridge_stone" type="button">Stone Bridge (20 stone)</button>
         <button class="build-btn" data-build="path" type="button">Path (shovel)</button>
         <button class="build-btn" data-build="road" type="button">Road (2 stone + shovel)</button>
+        <button class="build-btn" data-build="castle" type="button">Castle (10 members)</button>
+        <button class="build-btn" data-build="silo" type="button">Silo (2 members)</button>
+        <button class="build-btn" data-build="church" type="button">Church (3 members)</button>
         <button class="build-btn" data-build="demolish" type="button">Demolish</button>
         </div>
         <div id="build-status">Select a build option.</div>
@@ -74,6 +102,11 @@
       <div class="panel-header">
         <div class="panel-title">Chat</div>
         <div class="panel-controls">
+          <label class="chat-toggle">
+            <input id="chat-toggle-local" type="checkbox" checked />
+            <span id="chat-toggle-local-label">Local chat</span>
+          </label>
+          <button id="community-leave" class="panel-btn" type="button" aria-label="Leave community" title="Leave community">Leave community</button>
           <button class="panel-btn panel-toggle" data-panel="chat" data-action="toggle" type="button" aria-label="Toggle chat" title="Toggle chat">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="square" />

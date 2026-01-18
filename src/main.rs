@@ -45,6 +45,16 @@ const PLAYER_COORD_VERSION: i32 = 1;
 const TREE_GROW_INTERVAL_MS: i64 = 30_000;
 const TREE_MAX_SIZE: i32 = 3;
 const ROCK_MAX_SIZE: i32 = 3;
+const COMMUNITY_AREA_SIZE: i32 = 10;
+const COMMUNITY_CREATE_WOOD: i32 = 200;
+const COMMUNITY_CREATE_STONE: i32 = 10;
+const COMMUNITY_APPROVAL_TIMEOUT_MS: i64 = 60_000;
+const CASTLE_SIZE: i32 = 8;
+const CHURCH_SIZE: i32 = 5;
+const SILO_SIZE: i32 = 3;
+const CASTLE_MEMBER_COUNT: usize = 10;
+const CHURCH_MEMBER_COUNT: usize = 3;
+const SILO_MEMBER_COUNT: usize = 2;
 
 const TILE_GRASS: u8 = 0;
 const TILE_WATER: u8 = 1;
@@ -108,6 +118,8 @@ async fn main() -> AppResult<()> {
     let state = Arc::new(RwLock::new(GameState::new()));
     {
         let structures = store.load_structures().await?;
+        let communities = store.load_communities().await?;
+        let storages = store.load_storages().await?;
         let mut state_guard = state.write().await;
         let mut max_id = 0;
         for doc in structures {
@@ -126,6 +138,31 @@ async fn main() -> AppResult<()> {
         }
         if max_id >= state_guard.next_structure_id {
             state_guard.next_structure_id = max_id + 1;
+        }
+        for doc in communities {
+            let mut member_set = HashSet::new();
+            for member in doc.members {
+                member_set.insert(member);
+            }
+            let community = Community {
+                id: doc.id.clone(),
+                members: member_set,
+                areas: doc.areas.clone(),
+            };
+            for area in &doc.areas {
+                insert_community_area_tiles(&mut state_guard, &doc.id, *area);
+            }
+            state_guard.communities.insert(doc.id, community);
+        }
+        for doc in storages {
+            state_guard.storages.insert(
+                doc.id as u64,
+                Storage {
+                    id: doc.id as u64,
+                    community_id: doc.community_id,
+                    inventory: doc.inventory,
+                },
+            );
         }
     }
 
@@ -330,34 +367,79 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                 return;
             }
             let trimmed = trimmed.chars().take(160).collect::<String>();
-            let (sender_name, was_typing) = {
+            let (sender_name, sender_id, sender_community_id, sender_pos, was_typing) = {
                 let mut state = app_state.state.write().await;
-                let name = state
-                    .players
-                    .get(sid)
+                let player = state.players.get(sid);
+                let name = player
                     .map(|player| player.name.clone())
                     .unwrap_or_else(|| "Wanderer".to_string());
+                let community_id = player.and_then(|player| player.community_id.clone());
+                let pos = player.map(|player| (player.x, player.y));
                 let was_typing = state.typing.remove(sid).is_some();
-                (name, was_typing)
+                (name, sid.to_string(), community_id, pos, was_typing)
             };
-            broadcast_message(
-                &app_state.state,
-                ServerMessage::Chat {
-                    from: sender_name,
-                    text: trimmed,
-                },
-            )
-            .await;
+            let mut state = app_state.state.write().await;
+            let lang = player_language(&state, &sender_id);
+            if let Some((sx, sy)) = sender_pos {
+                let sender_chunk = chunk_coord_for_position(sx, sy, app_state.world.chunk_size);
+                for (player_id, sender) in state.clients.iter() {
+                    let player = match state.players.get(player_id) {
+                        Some(player) => player,
+                        None => continue,
+                    };
+                    let recipient_chunk =
+                        chunk_coord_for_position(player.x, player.y, app_state.world.chunk_size);
+                    if !chunk_in_radius(sender_chunk, recipient_chunk, ENTITY_VISIBILITY_RADIUS) {
+                        continue;
+                    }
+                    if let Some(comm_id) = sender_community_id.as_ref() {
+                        if player.community_id.as_ref() == Some(comm_id) {
+                            continue;
+                        }
+                    }
+                    let _ = sender.send(ServerMessage::Chat {
+                        from: sender_name.clone(),
+                        text: trimmed.clone(),
+                        channel: "local".to_string(),
+                        community_member: false,
+                    });
+                }
+            }
+            if let Some(community_id) = sender_community_id.as_ref() {
+                if let Some(community) = state.communities.get(community_id) {
+                    for member_id in &community.members {
+                        if let Some(sender) = state.clients.get(member_id) {
+                            let _ = sender.send(ServerMessage::Chat {
+                                from: sender_name.clone(),
+                                text: trimmed.clone(),
+                                channel: "community".to_string(),
+                                community_member: true,
+                            });
+                        }
+                    }
+                } else {
+                    send_system_message(
+                        &mut state,
+                        &sender_id,
+                        message_community_missing(lang).to_string(),
+                    );
+                }
+            }
             if was_typing {
-                broadcast_message(
-                    &app_state.state,
+                broadcast_message_inline(
+                    &state,
                     ServerMessage::Typing {
                         id: sid.to_string(),
                         typing: false,
                     },
-                )
-                .await;
+                );
             }
+        }
+        ClientMessage::CommunityApproval { request_id, approve } => {
+            handle_community_approval(app_state, sid, &request_id, approve).await;
+        }
+        ClientMessage::CommunityLeave => {
+            handle_community_leave(app_state, sid).await;
         }
         ClientMessage::SetName { name } => {
             let normalized = match normalize_player_name(&name) {
@@ -420,6 +502,20 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                 let _ = sender.send(ServerMessage::Inventory { items });
             }
             send_system_message(&mut state, &player_id, message);
+        }
+        ClientMessage::StorageDeposit {
+            storage_id,
+            item_id,
+            count,
+        } => {
+            handle_storage_deposit(app_state, sid, storage_id, &item_id, count).await;
+        }
+        ClientMessage::StorageWithdraw {
+            storage_id,
+            item_id,
+            count,
+        } => {
+            handle_storage_withdraw(app_state, sid, storage_id, &item_id, count).await;
         }
         ClientMessage::Build { kind, x, y } => {
             handle_build_request(app_state, sid, kind, x, y).await;
@@ -533,9 +629,18 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
 }
 
 async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: i32, y: i32) {
+    if matches!(kind.as_str(), "castle" | "silo" | "church") {
+        handle_group_build_request(app_state, sid, &kind, x, y).await;
+        return;
+    }
+
     let mut state = app_state.state.write().await;
-    let (player_id, inventory_snapshot) = match state.players.get(sid) {
-        Some(player) => (player.id.clone(), player.inventory.clone()),
+    let (player_id, inventory_snapshot, player_community_id) = match state.players.get(sid) {
+        Some(player) => (
+            player.id.clone(),
+            player.inventory.clone(),
+            player.community_id.clone(),
+        ),
         None => return,
     };
 
@@ -702,6 +807,16 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     }
 
     for tile in &tiles {
+        if let Some(owner) = community_tile_owner(&state, tile.x, tile.y) {
+            if player_community_id.as_ref() != Some(owner) {
+                send_system_message(
+                    &mut state,
+                    &player_id,
+                    message_community_members_only(lang).to_string(),
+                );
+                return;
+            }
+        }
         if state
             .structure_tiles
             .contains_key(&TileCoord { x: tile.x, y: tile.y })
@@ -901,6 +1016,1461 @@ async fn handle_demolish_request(app_state: &AppState, sid: &str, x: i32, y: i32
     });
 }
 
+async fn handle_community_approval(
+    app_state: &AppState,
+    sid: &str,
+    request_id: &str,
+    approve: bool,
+) {
+    let (pending, lang) = {
+        let mut state = app_state.state.write().await;
+        let lang = player_language(&state, sid);
+        let pending = match state.pending_approvals.get_mut(request_id) {
+            Some(pending) => pending,
+            None => return,
+        };
+        if !pending.required.contains(sid) {
+            return;
+        }
+        if !approve {
+            let pending = state.pending_approvals.remove(request_id).unwrap();
+            notify_approval_cancelled(&mut state, &pending, lang);
+            return;
+        }
+        pending.approvals.insert(sid.to_string());
+        if pending.approvals.len() != pending.required.len() {
+            return;
+        }
+        let pending = state.pending_approvals.remove(request_id).unwrap();
+        (pending, lang)
+    };
+
+    match pending.kind {
+        ApprovalKind::Join {
+            community_id,
+            target_id,
+            area,
+            requester_id,
+        } => {
+            handle_join_approval_complete(
+                app_state,
+                &community_id,
+                &target_id,
+                area,
+                &requester_id,
+                lang,
+            )
+            .await;
+        }
+        ApprovalKind::Build {
+            community_id,
+            build_kind,
+            x,
+            y,
+            requester_id,
+            participants,
+        } => {
+            handle_build_approval_complete(
+                app_state,
+                &community_id,
+                &build_kind,
+                x,
+                y,
+                &requester_id,
+                &participants,
+                lang,
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_community_leave(app_state: &AppState, sid: &str) {
+    let mut state = app_state.state.write().await;
+    let lang = player_language(&state, sid);
+    let (player_id, community_id_opt) = match state.players.get(sid) {
+        Some(player) => (player.id.clone(), player.community_id.clone()),
+        None => return,
+    };
+    let community_id = match community_id_opt {
+        Some(id) => id,
+        None => {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_community_not_member(lang).to_string(),
+            );
+            return;
+        }
+    };
+    if let Some(player) = state.players.get_mut(sid) {
+        player.community_id = None;
+    }
+
+    if let Some(community) = state.communities.get_mut(&community_id) {
+        community.members.remove(&player_id);
+    }
+    send_system_message(
+        &mut state,
+        &player_id,
+        message_community_left(lang).to_string(),
+    );
+
+    let player_doc = state.players.get(sid).map(|player| player.to_doc());
+    let mut delete_community = false;
+    let community_doc = if let Some(community) = state.communities.get(&community_id) {
+        if community.members.is_empty() {
+            delete_community = true;
+            None
+        } else {
+            Some(CommunityDoc {
+                id: community.id.clone(),
+                members: community.members.iter().cloned().collect(),
+                areas: community.areas.clone(),
+            })
+        }
+    } else {
+        None
+    };
+    if delete_community {
+        remove_community_from_state(&mut state, &community_id);
+    }
+    drop(state);
+
+    let store = app_state.store.clone();
+    if let Some(doc) = player_doc {
+        let store = store.clone();
+        tokio::spawn(async move {
+            let _ = store.save_player(&doc).await;
+        });
+    }
+    if delete_community {
+        let store = store.clone();
+        let community_id = community_id.clone();
+        tokio::spawn(async move {
+            let _ = store.delete_community(&community_id).await;
+            let _ = store
+                .delete_structures_by_owner_and_kinds(
+                    &community_id,
+                    &["community_fence", "community_float", "community_well"],
+                )
+                .await;
+            let _ = store.delete_storages_by_community(&community_id).await;
+        });
+    } else if let Some(doc) = community_doc {
+        let store = store.clone();
+        tokio::spawn(async move {
+            let _ = store.save_community(&doc).await;
+        });
+    }
+}
+
+async fn handle_storage_deposit(
+    app_state: &AppState,
+    sid: &str,
+    storage_id: u64,
+    item_id: &str,
+    count: i32,
+) {
+    if count <= 0 {
+        return;
+    }
+    let mut state = app_state.state.write().await;
+    let lang = player_language(&state, sid);
+    let (player_id, player_pos, community_id, has_item) = match state.players.get(sid) {
+        Some(player) => (
+            player.id.clone(),
+            (player.x, player.y),
+            player.community_id.clone(),
+            player.inventory.get(item_id).copied().unwrap_or(0) >= count,
+        ),
+        None => return,
+    };
+    let community_id = match community_id {
+        Some(id) => id,
+        None => {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_community_not_member(lang).to_string(),
+            );
+            return;
+        }
+    };
+    if !player_near_storage_at(&state, player_pos.0, player_pos.1, storage_id) {
+        return;
+    }
+    if !has_item {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_not_enough_materials(lang).to_string(),
+        );
+        return;
+    }
+
+    let (player_doc, player_items) = {
+        let player = match state.players.get_mut(sid) {
+            Some(player) => player,
+            None => return,
+        };
+        consume_item(&mut player.inventory, item_id, count);
+        player.last_inventory_hash = inventory_hash(&player.inventory);
+        let player_items =
+            build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
+        (player.to_doc(), player_items)
+    };
+
+    let (storage_items, storage_doc) = {
+        let storage = match state.storages.get_mut(&storage_id) {
+            Some(storage) => storage,
+            None => return,
+        };
+        if storage.community_id != community_id {
+            return;
+        }
+        add_item(&mut storage.inventory, item_id, count);
+        let storage_items =
+            build_inventory_items(&storage.inventory, app_state.data.as_ref(), lang);
+        let storage_doc = StorageDoc {
+            id: storage.id as i64,
+            community_id: storage.community_id.clone(),
+            inventory: storage.inventory.clone(),
+        };
+        (storage_items, storage_doc)
+    };
+
+    if let Some(sender) = state.clients.get(sid) {
+        let _ = sender.send(ServerMessage::Inventory { items: player_items });
+        let _ = sender.send(ServerMessage::Storage {
+            storage_id,
+            items: storage_items.clone(),
+        });
+    }
+
+    let store = app_state.store.clone();
+    tokio::spawn(async move {
+        let _ = store.save_player(&player_doc).await;
+        let _ = store.save_storage(&storage_doc).await;
+    });
+}
+
+async fn handle_storage_withdraw(
+    app_state: &AppState,
+    sid: &str,
+    storage_id: u64,
+    item_id: &str,
+    count: i32,
+) {
+    if count <= 0 {
+        return;
+    }
+    let mut state = app_state.state.write().await;
+    let lang = player_language(&state, sid);
+    let (player_id, player_pos, community_id) = match state.players.get(sid) {
+        Some(player) => (
+            player.id.clone(),
+            (player.x, player.y),
+            player.community_id.clone(),
+        ),
+        None => return,
+    };
+    let community_id = match community_id {
+        Some(id) => id,
+        None => {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_community_not_member(lang).to_string(),
+            );
+            return;
+        }
+    };
+    if !player_near_storage_at(&state, player_pos.0, player_pos.1, storage_id) {
+        return;
+    }
+    let storage_snapshot = match state.storages.get(&storage_id) {
+        Some(storage) => storage.clone(),
+        None => return,
+    };
+    if storage_snapshot.community_id != community_id {
+        return;
+    }
+    if storage_snapshot.inventory.get(item_id).copied().unwrap_or(0) < count {
+        return;
+    }
+
+    let (storage_items, storage_doc) = {
+        let storage = match state.storages.get_mut(&storage_id) {
+            Some(storage) => storage,
+            None => return,
+        };
+        consume_item(&mut storage.inventory, item_id, count);
+        let storage_items =
+            build_inventory_items(&storage.inventory, app_state.data.as_ref(), lang);
+        let storage_doc = StorageDoc {
+            id: storage.id as i64,
+            community_id: storage.community_id.clone(),
+            inventory: storage.inventory.clone(),
+        };
+        (storage_items, storage_doc)
+    };
+    let (player_doc, player_items) = {
+        let player = match state.players.get_mut(sid) {
+            Some(player) => player,
+            None => return,
+        };
+        add_item(&mut player.inventory, item_id, count);
+        player.last_inventory_hash = inventory_hash(&player.inventory);
+        let player_items =
+            build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
+        (player.to_doc(), player_items)
+    };
+    if let Some(sender) = state.clients.get(sid) {
+        let _ = sender.send(ServerMessage::Inventory { items: player_items });
+        let _ = sender.send(ServerMessage::Storage {
+            storage_id,
+            items: storage_items.clone(),
+        });
+    }
+
+    let store = app_state.store.clone();
+    tokio::spawn(async move {
+        let _ = store.save_player(&player_doc).await;
+        let _ = store.save_storage(&storage_doc).await;
+    });
+}
+
+fn handle_storage_interaction(player: &mut Player, state: &mut GameState, app_state: &AppState) -> bool {
+    let lang = player_language(state, &player.id);
+    let (storage_id, storage_community) = match find_nearby_storage(player, state) {
+        Some(result) => result,
+        None => return false,
+    };
+    if player.community_id.as_ref() != Some(&storage_community) {
+        send_system_message(state, &player.id, message_community_members_only(lang).to_string());
+        return true;
+    }
+    if let Some(storage) = state.storages.get(&storage_id) {
+        let items = build_inventory_items(&storage.inventory, app_state.data.as_ref(), lang);
+        if let Some(sender) = state.clients.get(&player.id) {
+            let _ = sender.send(ServerMessage::Storage {
+                storage_id,
+                items,
+            });
+        }
+        return true;
+    }
+    false
+}
+
+fn handle_community_interaction(
+    player: &mut Player,
+    state: &mut GameState,
+    app_state: &AppState,
+    now_ms: i64,
+) -> bool {
+    let lang = player_language(state, &player.id);
+    let player_tile = player_tile(player);
+    let area = community_area_origin(player_tile.x, player_tile.y);
+
+    if player.community_id.is_none() {
+        if let Some(community_id) = find_adjacent_community_request(state, &area) {
+            if community_area_overlaps(state, area) {
+                send_system_message(
+                    state,
+                    &player.id,
+                    message_community_area_overlap(lang).to_string(),
+                );
+                return true;
+            }
+            if !community_area_is_clear(state, area) {
+                send_system_message(
+                    state,
+                    &player.id,
+                    message_community_area_blocked(lang).to_string(),
+                );
+                return true;
+            }
+            if pending_join_request_exists(state, &community_id, &player.id) {
+                return true;
+            }
+            start_join_request(
+                state,
+                app_state,
+                &community_id,
+                &player.id,
+                &player.id,
+                area,
+                now_ms,
+            );
+            send_system_message(
+                state,
+                &player.id,
+                message_community_join_sent(lang).to_string(),
+            );
+            return true;
+        }
+
+        if community_area_overlaps(state, area) {
+            send_system_message(
+                state,
+                &player.id,
+                message_community_area_overlap(lang).to_string(),
+            );
+            return true;
+        }
+        if !community_area_is_clear(state, area) {
+            send_system_message(
+                state,
+                &player.id,
+                message_community_area_blocked(lang).to_string(),
+            );
+            return true;
+        }
+        let cost = [
+            ItemStack {
+                id: "wood".to_string(),
+                count: COMMUNITY_CREATE_WOOD,
+            },
+            ItemStack {
+                id: "stone".to_string(),
+                count: COMMUNITY_CREATE_STONE,
+            },
+        ];
+        if !has_items(&player.inventory, &cost) {
+            send_system_message(state, &player.id, message_not_enough_materials(lang).to_string());
+            return true;
+        }
+        if !remove_items(&mut player.inventory, &cost) {
+            send_system_message(state, &player.id, message_not_enough_materials(lang).to_string());
+            return true;
+        }
+        player.last_inventory_hash = inventory_hash(&player.inventory);
+
+        let community_id = Uuid::new_v4().to_string();
+        let mut members = HashSet::new();
+        members.insert(player.id.clone());
+        let community = Community {
+            id: community_id.clone(),
+            members,
+            areas: vec![area],
+        };
+        insert_community_area_tiles(state, &community_id, area);
+        state.communities.insert(community_id.clone(), community);
+        player.community_id = Some(community_id.clone());
+
+        let mut added_structures = Vec::new();
+        let well_tile = TileCoord {
+            x: player_tile.x,
+            y: player_tile.y,
+        };
+        let well_id = state.next_structure_id();
+        let well = StructureTile {
+            id: well_id,
+            kind: "community_well".to_string(),
+            x: well_tile.x,
+            y: well_tile.y,
+            owner_id: community_id.clone(),
+        };
+        state
+            .structure_tiles
+            .insert(TileCoord { x: well_tile.x, y: well_tile.y }, well.clone());
+        added_structures.push(well);
+
+        let mut fence_structures = rebuild_community_fences(state, app_state, &community_id);
+        added_structures.append(&mut fence_structures);
+
+        let items = build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
+        if let Some(sender) = state.clients.get(&player.id) {
+            let _ = sender.send(ServerMessage::Inventory { items });
+        }
+
+        let mut chunks = HashSet::new();
+        for structure in &added_structures {
+            chunks.insert(chunk_coord_for_tile(
+                structure.x,
+                structure.y,
+                app_state.world.chunk_size,
+            ));
+        }
+        let public_structures: Vec<StructurePublic> =
+            added_structures.iter().map(StructurePublic::from).collect();
+        send_to_players_in_chunks(
+            state,
+            app_state.world.chunk_size,
+            &chunks,
+            ServerMessage::StructureUpdate {
+                structures: public_structures.clone(),
+                state: "added".to_string(),
+            },
+        );
+        send_system_message(
+            state,
+            &player.id,
+            message_community_created(lang).to_string(),
+        );
+
+        let store = app_state.store.clone();
+        let community_doc = CommunityDoc {
+            id: community_id.clone(),
+            members: vec![player.id.clone()],
+            areas: vec![area],
+        };
+        let player_doc = player.to_doc();
+        let docs: Vec<StructureDoc> = added_structures
+            .iter()
+            .map(|tile| StructureDoc {
+                id: tile.id as i64,
+                kind: tile.kind.clone(),
+                x: tile.x,
+                y: tile.y,
+                owner_id: tile.owner_id.clone(),
+            })
+            .collect();
+        tokio::spawn(async move {
+            let _ = store.save_player(&player_doc).await;
+            let _ = store.save_community(&community_doc).await;
+            let _ = store.insert_structures(&docs).await;
+        });
+        return true;
+    }
+
+    if let Some(community_id) = player.community_id.clone() {
+        if let Some((target_id, target_area)) = find_nearby_join_target(player, state) {
+            if !community_area_adjacent(
+                state
+                    .communities
+                    .get(&community_id)
+                    .expect("community missing"),
+                target_area,
+            ) {
+                send_system_message(
+                    state,
+                    &player.id,
+                    message_community_area_adjacent(lang).to_string(),
+                );
+                return true;
+            }
+            if community_area_overlaps(state, target_area) {
+                send_system_message(
+                    state,
+                    &player.id,
+                    message_community_area_overlap(lang).to_string(),
+                );
+                return true;
+            }
+            if !community_area_is_clear(state, target_area) {
+                send_system_message(
+                    state,
+                    &player.id,
+                    message_community_area_blocked(lang).to_string(),
+                );
+                return true;
+            }
+            if pending_join_request_exists(state, &community_id, &target_id) {
+                return true;
+            }
+            start_join_request(
+                state,
+                app_state,
+                &community_id,
+                &target_id,
+                &player.id,
+                target_area,
+                now_ms,
+            );
+            send_system_message(
+                state,
+                &player.id,
+                message_community_invite_sent(lang).to_string(),
+            );
+            return true;
+        }
+    }
+    false
+}
+
+fn notify_approval_cancelled(state: &mut GameState, pending: &PendingApproval, lang: Language) {
+    match &pending.kind {
+        ApprovalKind::Join { requester_id, target_id, .. } => {
+            send_system_message(
+                state,
+                requester_id,
+                message_community_request_declined(lang).to_string(),
+            );
+            send_system_message(
+                state,
+                target_id,
+                message_community_request_declined(lang).to_string(),
+            );
+        }
+        ApprovalKind::Build { requester_id, .. } => {
+            send_system_message(
+                state,
+                requester_id,
+                message_build_request_declined(lang).to_string(),
+            );
+        }
+    }
+}
+
+fn notify_approval_timeout(state: &mut GameState, pending: &PendingApproval) {
+    match &pending.kind {
+        ApprovalKind::Join {
+            requester_id,
+            target_id,
+            ..
+        } => {
+            let lang = player_language(state, requester_id);
+            send_system_message(
+                state,
+                requester_id,
+                message_request_timed_out(lang).to_string(),
+            );
+            let lang = player_language(state, target_id);
+            send_system_message(state, target_id, message_request_timed_out(lang).to_string());
+        }
+        ApprovalKind::Build { requester_id, .. } => {
+            let lang = player_language(state, requester_id);
+            send_system_message(state, requester_id, message_request_timed_out(lang).to_string());
+        }
+    }
+}
+
+async fn handle_group_build_request(
+    app_state: &AppState,
+    sid: &str,
+    build_kind: &str,
+    x: i32,
+    y: i32,
+) {
+    let mut state = app_state.state.write().await;
+    let (player_id, player_name, player_pos, community_id) = match state.players.get(sid) {
+        Some(player) => (
+            player.id.clone(),
+            player.name.clone(),
+            (player.x, player.y),
+            player.community_id.clone(),
+        ),
+        None => return,
+    };
+    let lang = player_language(&state, &player_id);
+    let community_id = match community_id {
+        Some(id) => id,
+        None => {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_community_not_member(lang).to_string(),
+            );
+            return;
+        }
+    };
+    if !position_in_community_area(&state, player_pos.0, player_pos.1, &community_id) {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_community_build_in_area(lang).to_string(),
+        );
+        return;
+    }
+
+    let (required_count, cost) = match build_kind {
+        "castle" => (
+            CASTLE_MEMBER_COUNT,
+            vec![
+                ItemStack {
+                    id: "stone".to_string(),
+                    count: 1000,
+                },
+                ItemStack {
+                    id: "wood".to_string(),
+                    count: 50,
+                },
+            ],
+        ),
+        "silo" => (
+            SILO_MEMBER_COUNT,
+            vec![ItemStack {
+                id: "wood".to_string(),
+                count: 15,
+            }],
+        ),
+        "church" => (
+            CHURCH_MEMBER_COUNT,
+            vec![
+                ItemStack {
+                    id: "stone".to_string(),
+                    count: 300,
+                },
+                ItemStack {
+                    id: "wood".to_string(),
+                    count: 70,
+                },
+            ],
+        ),
+        _ => return,
+    };
+
+    let community_members: Vec<String> = match state.communities.get(&community_id) {
+        Some(community) => community.members.iter().cloned().collect(),
+        None => return,
+    };
+    let mut candidates: Vec<String> = community_members
+        .iter()
+        .filter(|id| state.clients.contains_key(*id))
+        .filter(|id| {
+            if let Some(member) = state.players.get(*id) {
+                player_in_community_area(&state, member, &community_id)
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect();
+    if !candidates.contains(&player_id) {
+        candidates.push(player_id.clone());
+    }
+    if candidates.len() < required_count {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_build_need_members(lang).to_string(),
+        );
+        return;
+    }
+
+    candidates.sort();
+    let mut participants = Vec::new();
+    for id in candidates {
+        participants.push(id);
+        if participants.len() == required_count {
+            break;
+        }
+    }
+
+    let (tiles, _placements) = match group_build_layout(build_kind, x, y) {
+        Some(result) => result,
+        None => return,
+    };
+    for tile in &tiles {
+        if state
+            .structure_tiles
+            .contains_key(&TileCoord { x: tile.x, y: tile.y })
+        {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_spot_occupied(lang).to_string(),
+            );
+            return;
+        }
+        if resource_at_tile(&state, tile.x, tile.y) {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_clear_resource(lang).to_string(),
+            );
+            return;
+        }
+        if tile_at(&app_state.noise, tile.x, tile.y) == TILE_WATER {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_build_on_land(lang).to_string(),
+            );
+            return;
+        }
+        if community_tile_owner(&state, tile.x, tile.y)
+            .map(|id| id.as_str())
+            != Some(&community_id)
+        {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_community_build_in_area(lang).to_string(),
+            );
+            return;
+        }
+    }
+
+    let request_id = Uuid::new_v4().to_string();
+    let pending = PendingApproval {
+        kind: ApprovalKind::Build {
+            community_id: community_id.clone(),
+            build_kind: build_kind.to_string(),
+            x,
+            y,
+            requester_id: player_id.clone(),
+            participants: participants.clone(),
+        },
+        approvals: HashSet::new(),
+        required: participants.iter().cloned().collect(),
+        created_ms: now_millis(),
+    };
+    state.pending_approvals.insert(request_id.clone(), pending);
+
+    let requester_name = player_name.clone();
+    for participant_id in &participants {
+        if let Some(sender) = state.clients.get(participant_id) {
+            let participant_lang = player_language(&state, participant_id);
+            let (title, text, accept, decline) = approval_build_text(
+                build_kind,
+                &requester_name,
+                &cost,
+                participant_lang,
+            );
+            let _ = sender.send(ServerMessage::ApprovalRequest {
+                request_id: request_id.clone(),
+                title,
+                text,
+                accept,
+                decline,
+            });
+        }
+    }
+    send_system_message(
+        &mut state,
+        &player_id,
+        message_build_request_sent(lang).to_string(),
+    );
+}
+
+async fn handle_join_approval_complete(
+    app_state: &AppState,
+    community_id: &str,
+    target_id: &str,
+    area: CommunityArea,
+    requester_id: &str,
+    lang: Language,
+) {
+    let mut state = app_state.state.write().await;
+    let community_snapshot = match state.communities.get(community_id) {
+        Some(community) => Community {
+            id: community.id.clone(),
+            members: community.members.clone(),
+            areas: community.areas.clone(),
+        },
+        None => {
+            send_system_message(
+                &mut state,
+                requester_id,
+                message_community_missing(lang).to_string(),
+            );
+            return;
+        }
+    };
+    if !community_snapshot.members.contains(requester_id) && requester_id != target_id {
+        return;
+    }
+    if !community_area_adjacent(&community_snapshot, area) {
+        send_system_message(
+            &mut state,
+            requester_id,
+            message_community_area_adjacent(lang).to_string(),
+        );
+        return;
+    }
+    if community_area_overlaps(&state, area) || !community_area_is_clear(&state, area) {
+        send_system_message(
+            &mut state,
+            requester_id,
+            message_community_area_blocked(lang).to_string(),
+        );
+        return;
+    }
+    if let Some(community) = state.communities.get_mut(community_id) {
+        community.members.insert(target_id.to_string());
+        community.areas.push(area);
+    }
+    insert_community_area_tiles(&mut state, community_id, area);
+
+    let joined_player_id = if let Some(player) = state.players.get_mut(target_id) {
+        player.community_id = Some(community_id.to_string());
+        Some(player.id.clone())
+    } else {
+        None
+    };
+    if let Some(player_id) = joined_player_id {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_community_joined(lang).to_string(),
+        );
+    }
+
+    let removed = remove_community_fences(&mut state, community_id);
+    let added = rebuild_community_fences(&mut state, app_state, community_id);
+    if !removed.is_empty() || !added.is_empty() {
+        let mut chunks = HashSet::new();
+        for structure in removed.iter().chain(added.iter()) {
+            chunks.insert(chunk_coord_for_tile(
+                structure.x,
+                structure.y,
+                app_state.world.chunk_size,
+            ));
+        }
+        if !removed.is_empty() {
+            let removed_public: Vec<StructurePublic> =
+                removed.iter().map(StructurePublic::from).collect();
+            send_to_players_in_chunks(
+                &state,
+                app_state.world.chunk_size,
+                &chunks,
+                ServerMessage::StructureUpdate {
+                    structures: removed_public,
+                    state: "removed".to_string(),
+                },
+            );
+        }
+        if !added.is_empty() {
+            let added_public: Vec<StructurePublic> =
+                added.iter().map(StructurePublic::from).collect();
+            send_to_players_in_chunks(
+                &state,
+                app_state.world.chunk_size,
+                &chunks,
+                ServerMessage::StructureUpdate {
+                    structures: added_public,
+                    state: "added".to_string(),
+                },
+            );
+        }
+    }
+
+    let community_doc = state
+        .communities
+        .get(community_id)
+        .map(|community| CommunityDoc {
+            id: community.id.clone(),
+            members: community.members.iter().cloned().collect(),
+            areas: community.areas.clone(),
+        })
+        .unwrap();
+    let target_doc = state.players.get(target_id).map(|player| player.to_doc());
+    let store = app_state.store.clone();
+    let fence_docs: Vec<StructureDoc> = added
+        .iter()
+        .map(|tile| StructureDoc {
+            id: tile.id as i64,
+            kind: tile.kind.clone(),
+            x: tile.x,
+            y: tile.y,
+            owner_id: tile.owner_id.clone(),
+        })
+        .collect();
+    let community_id = community_id.to_string();
+    tokio::spawn(async move {
+        let _ = store.save_community(&community_doc).await;
+        if let Some(doc) = target_doc {
+            let _ = store.save_player(&doc).await;
+        }
+        let _ = store
+            .delete_structures_by_owner_and_kinds(
+                &community_id,
+                &["community_fence", "community_float"],
+            )
+            .await;
+        let _ = store.insert_structures(&fence_docs).await;
+    });
+}
+
+async fn handle_build_approval_complete(
+    app_state: &AppState,
+    community_id: &str,
+    build_kind: &str,
+    x: i32,
+    y: i32,
+    requester_id: &str,
+    participants: &[String],
+    lang: Language,
+) {
+    let mut state = app_state.state.write().await;
+    let community_has_requester = match state.communities.get(community_id) {
+        Some(community) => community.members.contains(requester_id),
+        None => {
+            send_system_message(
+                &mut state,
+                requester_id,
+                message_community_missing(lang).to_string(),
+            );
+            return;
+        }
+    };
+    if !community_has_requester {
+        return;
+    }
+
+    let (tiles, placements) = match group_build_layout(build_kind, x, y) {
+        Some(result) => result,
+        None => return,
+    };
+
+    for tile in &tiles {
+        if state
+            .structure_tiles
+            .contains_key(&TileCoord { x: tile.x, y: tile.y })
+        {
+            send_system_message(&mut state, requester_id, message_spot_occupied(lang).to_string());
+            return;
+        }
+        if resource_at_tile(&state, tile.x, tile.y) {
+            send_system_message(&mut state, requester_id, message_clear_resource(lang).to_string());
+            return;
+        }
+        if tile_at(&app_state.noise, tile.x, tile.y) == TILE_WATER {
+            send_system_message(&mut state, requester_id, message_build_on_land(lang).to_string());
+            return;
+        }
+        if community_tile_owner(&state, tile.x, tile.y)
+            .map(|id| id.as_str())
+            != Some(community_id)
+        {
+            send_system_message(
+                &mut state,
+                requester_id,
+                message_community_build_in_area(lang).to_string(),
+            );
+            return;
+        }
+    }
+
+    let (required_count, cost) = match build_kind {
+        "castle" => (
+            CASTLE_MEMBER_COUNT,
+            vec![
+                ItemStack {
+                    id: "stone".to_string(),
+                    count: 1000,
+                },
+                ItemStack {
+                    id: "wood".to_string(),
+                    count: 50,
+                },
+            ],
+        ),
+        "silo" => (
+            SILO_MEMBER_COUNT,
+            vec![ItemStack {
+                id: "wood".to_string(),
+                count: 15,
+            }],
+        ),
+        "church" => (
+            CHURCH_MEMBER_COUNT,
+            vec![
+                ItemStack {
+                    id: "stone".to_string(),
+                    count: 300,
+                },
+                ItemStack {
+                    id: "wood".to_string(),
+                    count: 70,
+                },
+            ],
+        ),
+        _ => return,
+    };
+
+    if participants.len() < required_count {
+        send_system_message(
+            &mut state,
+            requester_id,
+            message_build_need_members(lang).to_string(),
+        );
+        return;
+    }
+
+    for participant_id in participants {
+        let participant = match state.players.get(participant_id) {
+            Some(player) => player,
+            None => {
+                send_system_message(
+                    &mut state,
+                    requester_id,
+                    message_build_request_declined(lang).to_string(),
+                );
+                return;
+            }
+        };
+        if !player_in_community_area(&state, participant, community_id) {
+            send_system_message(
+                &mut state,
+                requester_id,
+                message_build_need_members(lang).to_string(),
+            );
+            return;
+        }
+        if !has_items(&participant.inventory, &cost) {
+            send_system_message(&mut state, requester_id, message_not_enough_materials(lang).to_string());
+            return;
+        }
+    }
+
+    for participant_id in participants {
+        if let Some(player) = state.players.get_mut(participant_id) {
+            remove_items(&mut player.inventory, &cost);
+            player.last_inventory_hash = inventory_hash(&player.inventory);
+            let items = build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
+            if let Some(sender) = state.clients.get(participant_id) {
+                let _ = sender.send(ServerMessage::Inventory { items });
+            }
+        }
+    }
+
+    let structure_id = state.next_structure_id();
+    let mut new_tiles = Vec::new();
+    for (tile, kind) in placements {
+        let structure = StructureTile {
+            id: structure_id,
+            kind,
+            x: tile.x,
+            y: tile.y,
+            owner_id: requester_id.to_string(),
+        };
+        state
+            .structure_tiles
+            .insert(TileCoord { x: tile.x, y: tile.y }, structure.clone());
+        new_tiles.push(structure);
+    }
+
+    let structures_public: Vec<StructurePublic> = new_tiles.iter().map(StructurePublic::from).collect();
+    let mut chunks = HashSet::new();
+    for structure in &structures_public {
+        chunks.insert(chunk_coord_for_tile(
+            structure.x,
+            structure.y,
+            app_state.world.chunk_size,
+        ));
+    }
+    send_to_players_in_chunks(
+        &state,
+        app_state.world.chunk_size,
+        &chunks,
+        ServerMessage::StructureUpdate {
+            structures: structures_public,
+            state: "added".to_string(),
+        },
+    );
+    send_system_message(&mut state, requester_id, message_build_success(lang, build_kind));
+
+    if build_kind == "silo" {
+        state.storages.insert(
+            structure_id,
+            Storage {
+                id: structure_id,
+                community_id: community_id.to_string(),
+                inventory: HashMap::new(),
+            },
+        );
+    }
+
+    let docs: Vec<StructureDoc> = new_tiles
+        .into_iter()
+        .map(|tile| StructureDoc {
+            id: structure_id as i64,
+            kind: tile.kind,
+            x: tile.x,
+            y: tile.y,
+            owner_id: tile.owner_id,
+        })
+        .collect();
+    let store = app_state.store.clone();
+    let storage_doc = if build_kind == "silo" {
+        Some(StorageDoc {
+            id: structure_id as i64,
+            community_id: community_id.to_string(),
+            inventory: HashMap::new(),
+        })
+    } else {
+        None
+    };
+    tokio::spawn(async move {
+        let _ = store.insert_structures(&docs).await;
+        if let Some(doc) = storage_doc {
+            let _ = store.save_storage(&doc).await;
+        }
+    });
+}
+
+fn group_build_layout(build_kind: &str, x: i32, y: i32) -> Option<(Vec<TileCoord>, Vec<(TileCoord, String)>)> {
+    let (width, height, root_kind, fill_kind) = match build_kind {
+        "castle" => (CASTLE_SIZE, CASTLE_SIZE, "castle_root", "castle_fill"),
+        "silo" => (SILO_SIZE, SILO_SIZE, "silo_root", "silo_fill"),
+        "church" => (CHURCH_SIZE, CHURCH_SIZE, "church_root", "church_fill"),
+        _ => return None,
+    };
+    let mut tiles = Vec::new();
+    let mut placements = Vec::new();
+    let base_y = y - (height - 1);
+    for dy in 0..height {
+        for dx in 0..width {
+            let coord = TileCoord {
+                x: x + dx,
+                y: base_y + dy,
+            };
+            tiles.push(coord);
+            let kind = if dy == height - 1 && dx == 0 {
+                root_kind
+            } else {
+                fill_kind
+            };
+            placements.push((coord, kind.to_string()));
+        }
+    }
+    Some((tiles, placements))
+}
+
+fn find_nearby_storage(player: &Player, state: &GameState) -> Option<(u64, String)> {
+    for structure in state.structure_tiles.values() {
+        if structure.kind != "silo_root" {
+            continue;
+        }
+        let (sx, sy) = tile_anchor_position(structure.x, structure.y);
+        if distance(player.x, player.y, sx, sy) <= INTERACT_RANGE {
+            if let Some(storage) = state.storages.get(&structure.id) {
+                return Some((structure.id, storage.community_id.clone()));
+            }
+        }
+    }
+    None
+}
+
+fn player_near_storage_at(state: &GameState, x: f32, y: f32, storage_id: u64) -> bool {
+    for structure in state.structure_tiles.values() {
+        if structure.kind == "silo_root" && structure.id == storage_id {
+            let (sx, sy) = tile_anchor_position(structure.x, structure.y);
+            return distance(x, y, sx, sy) <= INTERACT_RANGE;
+        }
+    }
+    false
+}
+
+fn pending_join_request_exists(state: &GameState, community_id: &str, target_id: &str) -> bool {
+    state.pending_approvals.values().any(|pending| match &pending.kind {
+        ApprovalKind::Join {
+            community_id: existing,
+            target_id: existing_target,
+            ..
+        } => existing == community_id && existing_target == target_id,
+        _ => false,
+    })
+}
+
+fn find_adjacent_community_request(
+    state: &GameState,
+    area: &CommunityArea,
+) -> Option<String> {
+    for (community_id, community) in state.communities.iter() {
+        if community_area_adjacent(community, *area) {
+            return Some(community_id.clone());
+        }
+    }
+    None
+}
+
+fn find_nearby_join_target(player: &Player, state: &GameState) -> Option<(String, CommunityArea)> {
+    for other in state.players.values() {
+        if other.id == player.id {
+            continue;
+        }
+        if other.community_id.is_some() {
+            continue;
+        }
+        if distance(player.x, player.y, other.x, other.y) > INTERACT_RANGE {
+            continue;
+        }
+        let tile = player_tile(other);
+        return Some((other.id.clone(), community_area_origin(tile.x, tile.y)));
+    }
+    None
+}
+
+fn start_join_request(
+    state: &mut GameState,
+    app_state: &AppState,
+    community_id: &str,
+    target_id: &str,
+    requester_id: &str,
+    area: CommunityArea,
+    now_ms: i64,
+) {
+    let community = match state.communities.get(community_id) {
+        Some(community) => community,
+        None => return,
+    };
+    let mut required = HashSet::new();
+    for member_id in &community.members {
+        if state.clients.contains_key(member_id) {
+            required.insert(member_id.clone());
+        }
+    }
+    if required.is_empty() {
+        drop(required);
+        let app_state = app_state.clone();
+        let community_id = community_id.to_string();
+        let target_id = target_id.to_string();
+        let requester_id = requester_id.to_string();
+        tokio::spawn(async move {
+            handle_join_approval_complete(
+                &app_state,
+                &community_id,
+                &target_id,
+                area,
+                &requester_id,
+                Language::En,
+            )
+            .await;
+        });
+        return;
+    }
+    let request_id = Uuid::new_v4().to_string();
+    let pending = PendingApproval {
+        kind: ApprovalKind::Join {
+            community_id: community_id.to_string(),
+            target_id: target_id.to_string(),
+            area,
+            requester_id: requester_id.to_string(),
+        },
+        approvals: HashSet::new(),
+        required: required.clone(),
+        created_ms: now_ms,
+    };
+    state.pending_approvals.insert(request_id.clone(), pending);
+    let requester_name = state
+        .players
+        .get(requester_id)
+        .map(|player| player.name.clone())
+        .unwrap_or_else(|| "Wanderer".to_string());
+    let target_name = state
+        .players
+        .get(target_id)
+        .map(|player| player.name.clone())
+        .unwrap_or_else(|| "Wanderer".to_string());
+    for member_id in required {
+        if let Some(sender) = state.clients.get(&member_id) {
+            let lang = player_language(state, &member_id);
+            let (title, text, accept, decline) = approval_join_text(&requester_name, &target_name, lang);
+            let _ = sender.send(ServerMessage::ApprovalRequest {
+                request_id: request_id.clone(),
+                title,
+                text,
+                accept,
+                decline,
+            });
+        }
+    }
+}
+
+fn remove_community_from_state(state: &mut GameState, community_id: &str) {
+    state.communities.remove(community_id);
+    state
+        .community_tiles
+        .retain(|_, owner| owner != community_id);
+    state.structure_tiles.retain(|_, structure| {
+        if structure.owner_id != community_id {
+            return true;
+        }
+        !matches!(
+            structure.kind.as_str(),
+            "community_fence" | "community_float" | "community_well"
+        )
+    });
+    state
+        .storages
+        .retain(|_, storage| storage.community_id != community_id);
+}
+
+fn remove_community_fences(state: &mut GameState, community_id: &str) -> Vec<StructureTile> {
+    let mut removed = Vec::new();
+    state.structure_tiles.retain(|_, structure| {
+        if structure.owner_id == community_id
+            && matches!(structure.kind.as_str(), "community_fence" | "community_float")
+        {
+            removed.push(structure.clone());
+            return false;
+        }
+        true
+    });
+    removed
+}
+
+fn rebuild_community_fences(
+    state: &mut GameState,
+    app_state: &AppState,
+    community_id: &str,
+) -> Vec<StructureTile> {
+    let mut community_tiles = HashSet::new();
+    for (tile, owner) in &state.community_tiles {
+        if owner == community_id {
+            community_tiles.insert(*tile);
+        }
+    }
+    let mut added = Vec::new();
+    for tile in &community_tiles {
+        let neighbors = [
+            TileCoord {
+                x: tile.x + 1,
+                y: tile.y,
+            },
+            TileCoord {
+                x: tile.x - 1,
+                y: tile.y,
+            },
+            TileCoord {
+                x: tile.x,
+                y: tile.y + 1,
+            },
+            TileCoord {
+                x: tile.x,
+                y: tile.y - 1,
+            },
+        ];
+        if neighbors.iter().all(|neighbor| community_tiles.contains(neighbor)) {
+            continue;
+        }
+        let kind = if tile_at(&app_state.noise, tile.x, tile.y) == TILE_WATER {
+            "community_float"
+        } else {
+            "community_fence"
+        };
+        let structure = StructureTile {
+            id: state.next_structure_id(),
+            kind: kind.to_string(),
+            x: tile.x,
+            y: tile.y,
+            owner_id: community_id.to_string(),
+        };
+        state
+            .structure_tiles
+            .insert(TileCoord { x: tile.x, y: tile.y }, structure.clone());
+        added.push(structure);
+    }
+    added
+}
+
+fn approval_join_text(
+    requester_name: &str,
+    target_name: &str,
+    lang: Language,
+) -> (String, String, String, String) {
+    match lang {
+        Language::De => (
+            "Beitrittsanfrage".to_string(),
+            format!("{} möchte {} zur Gemeinschaft hinzufügen.", requester_name, target_name),
+            "Zustimmen".to_string(),
+            "Ablehnen".to_string(),
+        ),
+        Language::En => (
+            "Join request".to_string(),
+            format!("{} wants to add {} to the community.", requester_name, target_name),
+            "Approve".to_string(),
+            "Decline".to_string(),
+        ),
+    }
+}
+
 fn chunk_coord_for_position(x: f32, y: f32, chunk_size: i32) -> ChunkCoord {
     let size = chunk_size as f32;
     ChunkCoord {
@@ -1034,7 +2604,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                 update_player_movement(
                     &mut player,
                     input,
-                    &state.structure_tiles,
+                    &state,
                     &app_state.noise,
                     dt,
                 );
@@ -1043,9 +2613,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                     input,
                     now_ms,
                     &mut state,
-                    &app_state.world,
-                    &app_state.noise,
-                    &app_state.data,
+                    app_state,
                 );
                 apply_player_regen(&mut player, now_ms);
                 let next_inventory_hash = inventory_hash(&player.inventory);
@@ -1088,6 +2656,18 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                     typing: false,
                 },
             );
+        }
+
+        let mut expired_approvals = Vec::new();
+        for (id, pending) in state.pending_approvals.iter() {
+            if now_ms - pending.created_ms > COMMUNITY_APPROVAL_TIMEOUT_MS {
+                expired_approvals.push(id.clone());
+            }
+        }
+        for id in expired_approvals {
+            if let Some(pending) = state.pending_approvals.remove(&id) {
+                notify_approval_timeout(&mut state, &pending);
+            }
         }
 
         let chunk_size = app_state.world.chunk_size;
@@ -1230,7 +2810,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
 fn update_player_movement(
     player: &mut Player,
     input: InputState,
-    structure_tiles: &HashMap<TileCoord, StructureTile>,
+    state: &GameState,
     noise: &WorldNoise,
     dt: f32,
 ) {
@@ -1266,10 +2846,10 @@ fn update_player_movement(
     let next_x = player.x + dx * PLAYER_SPEED * dt;
     let next_y = player.y + dy * PLAYER_SPEED * dt;
 
-    if can_walk(structure_tiles, noise, next_x, player.y) {
+    if can_walk_player(state, noise, player, next_x, player.y) {
         player.x = next_x;
     }
-    if can_walk(structure_tiles, noise, player.x, next_y) {
+    if can_walk_player(state, noise, player, player.x, next_y) {
         player.y = next_y;
     }
 }
@@ -1291,9 +2871,7 @@ fn handle_player_actions(
     input: InputState,
     now_ms: i64,
     state: &mut GameState,
-    world: &WorldConfig,
-    noise: &WorldNoise,
-    data: &GameData,
+    app_state: &AppState,
 ) {
     if input.gather && now_ms - player.last_gather_ms >= 400 {
         let lang = player_language(state, &player.id);
@@ -1302,37 +2880,77 @@ fn handle_player_actions(
         let mut did_gather = false;
 
         {
-            if let Some((resource, def)) = find_nearby_resource(player, state, data) {
-                did_gather = true;
-                let tool_power = best_tool_power(&player.inventory, data, &def.tool);
-                if let Some(mut power) = tool_power {
-                    if resource.kind == "rock" {
-                        power = (power as f32 / resource.size.max(1) as f32).ceil() as i32;
-                    }
-                    resource.hp -= power;
-                    if resource.hp <= 0 {
-                        resource.hp = 0;
-                        resource.respawn_at_ms = Some(now_ms + def.respawn_ms);
-                        let yield_multiplier = resource.size.max(1);
-                        for drop in &def.drops {
-                            let count = drop.count * yield_multiplier;
-                            add_item(&mut player.inventory, &drop.id, count);
-                            let item_name =
-                                localize_item_name(data, &drop.id, lang);
-                            messages.push(message_collected(&item_name, count, lang));
-                        }
-                        resource_update = Some((
-                            ResourceNodePublic::from(resource.clone()),
-                            "removed".to_string(),
-                        ));
+            if let Some((resource, def, community_owner)) =
+                find_nearby_resource(player, state, app_state.data.as_ref())
+            {
+                if let Some(community_id) = community_owner.as_ref() {
+                    if player.community_id.as_ref() != Some(community_id) {
+                        messages.push(message_community_members_only(lang).to_string());
                     } else {
-                        let resource_name =
-                            localize_resource_name(data, &resource.kind, lang);
-                        messages.push(message_hit_resource(&resource_name, resource.hp, lang));
+                        did_gather = true;
+                        let tool_power = best_tool_power(&player.inventory, app_state.data.as_ref(), &def.tool);
+                        if let Some(mut power) = tool_power {
+                            if resource.kind == "rock" {
+                                power = (power as f32 / resource.size.max(1) as f32).ceil() as i32;
+                            }
+                            resource.hp -= power;
+                            if resource.hp <= 0 {
+                                resource.hp = 0;
+                                resource.respawn_at_ms = Some(now_ms + def.respawn_ms);
+                                let yield_multiplier = resource.size.max(1);
+                                for drop in &def.drops {
+                                    let count = drop.count * yield_multiplier;
+                                    add_item(&mut player.inventory, &drop.id, count);
+                                    let item_name =
+                                        localize_item_name(app_state.data.as_ref(), &drop.id, lang);
+                                    messages.push(message_collected(&item_name, count, lang));
+                                }
+                                resource_update = Some((
+                                    ResourceNodePublic::from(resource.clone()),
+                                    "removed".to_string(),
+                                ));
+                            } else {
+                                let resource_name =
+                                    localize_resource_name(app_state.data.as_ref(), &resource.kind, lang);
+                                messages.push(message_hit_resource(&resource_name, resource.hp, lang));
+                            }
+                        } else {
+                            let tool_name = localize_tool_name(&def.tool, lang);
+                            messages.push(message_need_tool(&tool_name, lang));
+                        }
                     }
                 } else {
-                    let tool_name = localize_tool_name(&def.tool, lang);
-                    messages.push(message_need_tool(&tool_name, lang));
+                    did_gather = true;
+                    let tool_power = best_tool_power(&player.inventory, app_state.data.as_ref(), &def.tool);
+                    if let Some(mut power) = tool_power {
+                        if resource.kind == "rock" {
+                            power = (power as f32 / resource.size.max(1) as f32).ceil() as i32;
+                        }
+                        resource.hp -= power;
+                        if resource.hp <= 0 {
+                            resource.hp = 0;
+                            resource.respawn_at_ms = Some(now_ms + def.respawn_ms);
+                            let yield_multiplier = resource.size.max(1);
+                            for drop in &def.drops {
+                                let count = drop.count * yield_multiplier;
+                                add_item(&mut player.inventory, &drop.id, count);
+                                let item_name =
+                                    localize_item_name(app_state.data.as_ref(), &drop.id, lang);
+                                messages.push(message_collected(&item_name, count, lang));
+                            }
+                            resource_update = Some((
+                                ResourceNodePublic::from(resource.clone()),
+                                "removed".to_string(),
+                            ));
+                        } else {
+                            let resource_name =
+                                localize_resource_name(app_state.data.as_ref(), &resource.kind, lang);
+                            messages.push(message_hit_resource(&resource_name, resource.hp, lang));
+                        }
+                    } else {
+                        let tool_name = localize_tool_name(&def.tool, lang);
+                        messages.push(message_need_tool(&tool_name, lang));
+                    }
                 }
             }
         }
@@ -1344,7 +2962,7 @@ fn handle_player_actions(
             send_system_message(state, &player.id, text);
         }
         if let Some((resource, state_label)) = resource_update {
-            let chunk = chunk_coord_for_tile(resource.x, resource.y, world.chunk_size);
+            let chunk = chunk_coord_for_tile(resource.x, resource.y, app_state.world.chunk_size);
             if let Some(sender) = state.clients.get(&player.id) {
                 let _ = sender.send(ServerMessage::ResourceUpdate {
                     resource: resource.clone(),
@@ -1353,7 +2971,7 @@ fn handle_player_actions(
             }
             send_to_players_in_chunk(
                 state,
-                world.chunk_size,
+                app_state.world.chunk_size,
                 chunk,
                 ServerMessage::ResourceUpdate {
                     resource,
@@ -1364,29 +2982,33 @@ fn handle_player_actions(
     }
 
     if input.attack {
-        if let Some(weapon) = best_melee_weapon(&player.inventory, data) {
+        if let Some(weapon) = best_melee_weapon(&player.inventory, app_state.data.as_ref()) {
             if now_ms - player.last_attack_ms >= weapon.cooldown_ms {
-                if attack_monster_melee(player, state, &weapon, data) {
+                if attack_monster_melee(player, state, &weapon, app_state.data.as_ref()) {
                     player.last_attack_ms = now_ms;
-                } else if try_ranged_attack(player, state, data, now_ms) {
+                } else if try_ranged_attack(player, state, app_state.data.as_ref(), now_ms) {
                     player.last_attack_ms = now_ms;
                 }
             }
-        } else if try_ranged_attack(player, state, data, now_ms) {
+        } else if try_ranged_attack(player, state, app_state.data.as_ref(), now_ms) {
             player.last_attack_ms = now_ms;
         }
     }
 
     if input.interact && now_ms - player.last_interact_ms >= 500 {
-        if let Some(npc) = find_nearby_npc(player, data) {
-            handle_npc_interaction(player, npc, state, data);
+        if let Some(npc) = find_nearby_npc(player, app_state.data.as_ref()) {
+            handle_npc_interaction(player, npc, state, app_state.data.as_ref());
+            player.last_interact_ms = now_ms;
+        } else if handle_storage_interaction(player, state, app_state) {
+            player.last_interact_ms = now_ms;
+        } else if handle_community_interaction(player, state, app_state, now_ms) {
             player.last_interact_ms = now_ms;
         }
     }
 
     if player.hp <= 0 {
         player.hp = MAX_HP;
-        let (spawn_x, spawn_y) = spawn_near_campfire(world, noise);
+        let (spawn_x, spawn_y) = spawn_near_campfire(&app_state.world, &app_state.noise);
         player.x = spawn_x;
         player.y = spawn_y;
         let lang = player_language(state, &player.id);
@@ -1836,7 +3458,7 @@ fn find_nearby_resource<'a>(
     player: &Player,
     state: &'a mut GameState,
     data: &'a GameData,
-) -> Option<(&'a mut ResourceNode, &'a ResourceDef)> {
+) -> Option<(&'a mut ResourceNode, &'a ResourceDef, Option<String>)> {
     for resources in state.resources.values_mut() {
         for res in resources.iter_mut() {
             if res.hp <= 0 {
@@ -1845,7 +3467,11 @@ fn find_nearby_resource<'a>(
             let dist = distance(player.x, player.y, res.x as f32 + 0.5, res.y as f32 + 0.5);
             if dist <= GATHER_RANGE {
                 if let Some(def) = data.resources.get(&res.kind) {
-                    return Some((res, def));
+                    let owner = state
+                        .community_tiles
+                        .get(&TileCoord { x: res.x, y: res.y })
+                        .cloned();
+                    return Some((res, def, owner));
                 }
             }
         }
@@ -2147,6 +3773,9 @@ fn message_build_success(lang: Language, kind: &str) -> String {
             "bridge_stone" => "Du baust eine Steinbrücke.".to_string(),
             "path" => "Du legst einen Pfad an.".to_string(),
             "road" => "Du baust eine Straße.".to_string(),
+            "castle" => "Ihr baut ein Schloss.".to_string(),
+            "silo" => "Ihr baut ein Lagerhaus.".to_string(),
+            "church" => "Ihr baut eine Kirche.".to_string(),
             _ => "Unbekannte Bauoption.".to_string(),
         },
         Language::En => match kind {
@@ -2156,6 +3785,9 @@ fn message_build_success(lang: Language, kind: &str) -> String {
             "bridge_stone" => "You build a stone bridge.".to_string(),
             "path" => "You lay down a path.".to_string(),
             "road" => "You build a road.".to_string(),
+            "castle" => "You build a castle together.".to_string(),
+            "silo" => "You build a storage silo together.".to_string(),
+            "church" => "You build a church together.".to_string(),
             _ => "Unknown build option.".to_string(),
         },
     }
@@ -2336,6 +3968,161 @@ fn message_quest_needs(name: &str, description: &str, needs: &str, lang: Languag
     }
 }
 
+fn message_community_missing(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Diese Gemeinschaft existiert nicht mehr.",
+        Language::En => "That community no longer exists.",
+    }
+}
+
+fn message_community_members_only(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Nur Gemeinschaftsmitglieder dürfen hier handeln.",
+        Language::En => "Only community members can do that here.",
+    }
+}
+
+fn message_community_not_member(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du bist in keiner Gemeinschaft.",
+        Language::En => "You are not in a community.",
+    }
+}
+
+fn message_community_created(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Gemeinschaft gegründet.",
+        Language::En => "Community founded.",
+    }
+}
+
+fn message_community_left(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du hast die Gemeinschaft verlassen.",
+        Language::En => "You left the community.",
+    }
+}
+
+fn message_community_joined(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du bist der Gemeinschaft beigetreten.",
+        Language::En => "You joined the community.",
+    }
+}
+
+fn message_community_join_sent(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Beitrittsanfrage gesendet.",
+        Language::En => "Join request sent.",
+    }
+}
+
+fn message_community_invite_sent(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Einladung gesendet.",
+        Language::En => "Invitation sent.",
+    }
+}
+
+fn message_community_area_blocked(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Der Bereich ist bereits bebaut.",
+        Language::En => "That area is already built over.",
+    }
+}
+
+fn message_community_area_overlap(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Der Bereich überschneidet sich mit einer Gemeinschaft.",
+        Language::En => "That area overlaps another community.",
+    }
+}
+
+fn message_community_area_adjacent(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Der Bereich muss direkt an die Gemeinschaft grenzen.",
+        Language::En => "The area must touch the community boundary.",
+    }
+}
+
+fn message_community_request_declined(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Anfrage abgelehnt.",
+        Language::En => "Request declined.",
+    }
+}
+
+fn message_request_timed_out(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Anfrage abgelaufen.",
+        Language::En => "Request timed out.",
+    }
+}
+
+fn message_build_request_sent(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Bauanfrage gesendet.",
+        Language::En => "Build request sent.",
+    }
+}
+
+fn message_build_request_declined(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Bauanfrage abgelehnt.",
+        Language::En => "Build request declined.",
+    }
+}
+
+fn message_build_need_members(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Nicht genug Gemeinschaftsmitglieder vor Ort.",
+        Language::En => "Not enough community members are present.",
+    }
+}
+
+fn message_community_build_in_area(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Das muss im Gemeinschaftsbereich gebaut werden.",
+        Language::En => "That must be built inside the community area.",
+    }
+}
+
+fn approval_build_text(
+    build_kind: &str,
+    requester_name: &str,
+    cost: &[ItemStack],
+    lang: Language,
+) -> (String, String, String, String) {
+    let (kind_name, title) = match (lang, build_kind) {
+        (Language::De, "castle") => ("Schloss", "Bauanfrage"),
+        (Language::De, "silo") => ("Lagerhaus", "Bauanfrage"),
+        (Language::De, "church") => ("Kirche", "Bauanfrage"),
+        (Language::En, "castle") => ("Castle", "Build request"),
+        (Language::En, "silo") => ("Silo", "Build request"),
+        (Language::En, "church") => ("Church", "Build request"),
+        _ => ("Build", "Build request"),
+    };
+    let costs = cost
+        .iter()
+        .map(|stack| format!("{} x{}", stack.id, stack.count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match lang {
+        Language::De => (
+            title.to_string(),
+            format!("{} möchte ein {} bauen. Kosten pro Mitglied: {}.", requester_name, kind_name, costs),
+            "Zustimmen".to_string(),
+            "Ablehnen".to_string(),
+        ),
+        Language::En => (
+            title.to_string(),
+            format!("{} wants to build a {}. Cost per member: {}.", requester_name, kind_name, costs),
+            "Approve".to_string(),
+            "Decline".to_string(),
+        ),
+    }
+}
+
 fn has_tool(inventory: &HashMap<String, i32>, data: &GameData, tool: &str) -> bool {
     best_tool_power(inventory, data, tool).is_some()
 }
@@ -2495,6 +4282,93 @@ fn tile_anchor_position(x: i32, y: i32) -> (f32, f32) {
     (x as f32 + ENTITY_FOOT_OFFSET_X, y as f32 + ENTITY_FOOT_OFFSET_Y)
 }
 
+fn community_area_origin(center_x: i32, center_y: i32) -> CommunityArea {
+    let half = COMMUNITY_AREA_SIZE / 2;
+    CommunityArea {
+        x: center_x - half,
+        y: center_y - half,
+    }
+}
+
+fn community_area_tiles(area: CommunityArea) -> Vec<TileCoord> {
+    let mut tiles = Vec::with_capacity((COMMUNITY_AREA_SIZE * COMMUNITY_AREA_SIZE) as usize);
+    for dy in 0..COMMUNITY_AREA_SIZE {
+        for dx in 0..COMMUNITY_AREA_SIZE {
+            tiles.push(TileCoord {
+                x: area.x + dx,
+                y: area.y + dy,
+            });
+        }
+    }
+    tiles
+}
+
+fn insert_community_area_tiles(state: &mut GameState, community_id: &str, area: CommunityArea) {
+    for tile in community_area_tiles(area) {
+        state
+            .community_tiles
+            .insert(TileCoord { x: tile.x, y: tile.y }, community_id.to_string());
+    }
+}
+
+fn community_tile_owner(state: &GameState, x: i32, y: i32) -> Option<&String> {
+    state.community_tiles.get(&TileCoord { x, y })
+}
+
+fn community_area_is_clear(state: &GameState, area: CommunityArea) -> bool {
+    for tile in community_area_tiles(area) {
+        if state
+            .structure_tiles
+            .contains_key(&TileCoord { x: tile.x, y: tile.y })
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn community_area_overlaps(state: &GameState, area: CommunityArea) -> bool {
+    for tile in community_area_tiles(area) {
+        if state
+            .community_tiles
+            .contains_key(&TileCoord { x: tile.x, y: tile.y })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn community_area_adjacent(community: &Community, area: CommunityArea) -> bool {
+    for existing in &community.areas {
+        let same_row = existing.y == area.y;
+        let same_col = existing.x == area.x;
+        if same_row && (existing.x + COMMUNITY_AREA_SIZE == area.x || area.x + COMMUNITY_AREA_SIZE == existing.x) {
+            return true;
+        }
+        if same_col && (existing.y + COMMUNITY_AREA_SIZE == area.y || area.y + COMMUNITY_AREA_SIZE == existing.y) {
+            return true;
+        }
+    }
+    false
+}
+
+fn player_tile(player: &Player) -> TileCoord {
+    let (x, y) = entity_foot_tile(player.x, player.y);
+    TileCoord { x, y }
+}
+
+fn player_in_community_area(state: &GameState, player: &Player, community_id: &str) -> bool {
+    let tile = player_tile(player);
+    community_tile_owner(state, tile.x, tile.y).map(|id| id == community_id).unwrap_or(false)
+}
+
+fn position_in_community_area(state: &GameState, x: f32, y: f32, community_id: &str) -> bool {
+    let (tile_x, tile_y) = entity_foot_tile(x, y);
+    community_tile_owner(state, tile_x, tile_y)
+        .map(|id| id == community_id)
+        .unwrap_or(false)
+}
 
 fn can_walk(
     structure_tiles: &HashMap<TileCoord, StructureTile>,
@@ -2504,10 +4378,26 @@ fn can_walk(
 ) -> bool {
     let (tile_x, tile_y) = entity_foot_tile(x, y);
     if let Some(structure) = structure_tiles.get(&TileCoord { x: tile_x, y: tile_y }) {
+        if structure.kind == "community_float" {
+            return true;
+        }
+        if structure.kind == "community_well" {
+            return false;
+        }
         if matches!(
             structure.kind.as_str(),
-            "hut_wood" | "hut_wood_root" | "hut_wood_block" | "house_stone" | "house_stone_root"
+            "hut_wood"
+                | "hut_wood_root"
+                | "hut_wood_block"
+                | "house_stone"
+                | "house_stone_root"
                 | "house_stone_block"
+                | "castle_root"
+                | "castle_fill"
+                | "silo_root"
+                | "silo_fill"
+                | "church_root"
+                | "church_fill"
         ) {
             return false;
         }
@@ -2516,6 +4406,16 @@ fn can_walk(
         }
     }
     tile_at(noise, tile_x, tile_y) != TILE_WATER
+}
+
+fn can_walk_player(state: &GameState, noise: &WorldNoise, player: &Player, x: f32, y: f32) -> bool {
+    let (tile_x, tile_y) = entity_foot_tile(x, y);
+    if let Some(community_id) = community_tile_owner(state, tile_x, tile_y) {
+        if player.community_id.as_ref() != Some(community_id) {
+            return false;
+        }
+    }
+    can_walk(&state.structure_tiles, noise, x, y)
 }
 
 fn generate_tiles(coord: ChunkCoord, world: &WorldConfig, noise: &WorldNoise) -> Vec<u8> {
@@ -2820,6 +4720,7 @@ fn default_player_doc(id: &str, world: &WorldConfig, noise: &WorldNoise) -> Play
         hp: MAX_HP,
         inventory,
         completed_quests: Vec::new(),
+        community_id: None,
         coord_version: PLAYER_COORD_VERSION,
     }
 }
@@ -2902,13 +4803,6 @@ async fn send_to_player(state: &Arc<RwLock<GameState>>, player_id: &str, msg: Se
     }
 }
 
-async fn broadcast_message(state: &Arc<RwLock<GameState>>, msg: ServerMessage) {
-    let state = state.read().await;
-    for sender in state.clients.values() {
-        let _ = sender.send(msg.clone());
-    }
-}
-
 fn broadcast_message_inline(state: &GameState, msg: ServerMessage) {
     for sender in state.clients.values() {
         let _ = sender.send(msg.clone());
@@ -2919,6 +4813,8 @@ fn broadcast_message_inline(state: &GameState, msg: ServerMessage) {
 struct GameStore {
     players: Collection<PlayerDoc>,
     structures: Collection<StructureDoc>,
+    communities: Collection<CommunityDoc>,
+    storages: Collection<StorageDoc>,
 }
 
 impl GameStore {
@@ -2928,6 +4824,8 @@ impl GameStore {
         Ok(Self {
             players: db.collection::<PlayerDoc>("players"),
             structures: db.collection::<StructureDoc>("structures"),
+            communities: db.collection::<CommunityDoc>("communities"),
+            storages: db.collection::<StorageDoc>("storages"),
         })
     }
 
@@ -2967,6 +4865,28 @@ impl GameStore {
         Ok(docs)
     }
 
+    async fn load_communities(&self) -> AppResult<Vec<CommunityDoc>> {
+        let mut cursor = self.communities.find(doc! {}, None).await?;
+        let mut docs = Vec::new();
+        while let Some(result) = cursor.next().await {
+            docs.push(result?);
+        }
+        Ok(docs)
+    }
+
+    async fn save_community(&self, doc: &CommunityDoc) -> AppResult<()> {
+        let opts = ReplaceOptions::builder().upsert(true).build();
+        self.communities
+            .replace_one(doc! { "_id": &doc.id }, doc, opts)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_community(&self, id: &str) -> AppResult<()> {
+        self.communities.delete_one(doc! { "_id": id }, None).await?;
+        Ok(())
+    }
+
     async fn insert_structures(&self, structures: &[StructureDoc]) -> AppResult<()> {
         if structures.is_empty() {
             return Ok(());
@@ -2975,8 +4895,49 @@ impl GameStore {
         Ok(())
     }
 
+    async fn load_storages(&self) -> AppResult<Vec<StorageDoc>> {
+        let mut cursor = self.storages.find(doc! {}, None).await?;
+        let mut docs = Vec::new();
+        while let Some(result) = cursor.next().await {
+            docs.push(result?);
+        }
+        Ok(docs)
+    }
+
+    async fn save_storage(&self, doc: &StorageDoc) -> AppResult<()> {
+        let opts = ReplaceOptions::builder().upsert(true).build();
+        self.storages
+            .replace_one(doc! { "id": doc.id }, doc, opts)
+            .await?;
+        Ok(())
+    }
+
     async fn delete_structure_group(&self, id: i64) -> AppResult<()> {
         self.structures.delete_many(doc! { "id": id }, None).await?;
+        Ok(())
+    }
+
+    async fn delete_structures_by_owner_and_kinds(
+        &self,
+        owner_id: &str,
+        kinds: &[&str],
+    ) -> AppResult<()> {
+        self.structures
+            .delete_many(
+                doc! {
+                    "owner_id": owner_id,
+                    "kind": { "$in": kinds }
+                },
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_storages_by_community(&self, community_id: &str) -> AppResult<()> {
+        self.storages
+            .delete_many(doc! { "community_id": community_id }, None)
+            .await?;
         Ok(())
     }
 }
@@ -2992,7 +4953,24 @@ struct PlayerDoc {
     inventory: HashMap<String, i32>,
     completed_quests: Vec<String>,
     #[serde(default)]
+    community_id: Option<String>,
+    #[serde(default)]
     coord_version: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommunityDoc {
+    #[serde(rename = "_id")]
+    id: String,
+    members: Vec<String>,
+    areas: Vec<CommunityArea>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageDoc {
+    id: i64,
+    community_id: String,
+    inventory: HashMap<String, i32>,
 }
 
 #[derive(Clone)]
@@ -3003,6 +4981,10 @@ struct GameState {
     projectiles: HashMap<u64, Projectile>,
     resources: HashMap<ChunkCoord, Vec<ResourceNode>>,
     structure_tiles: HashMap<TileCoord, StructureTile>,
+    communities: HashMap<String, Community>,
+    community_tiles: HashMap<TileCoord, String>,
+    storages: HashMap<u64, Storage>,
+    pending_approvals: HashMap<String, PendingApproval>,
     spawned_chunks: HashSet<ChunkCoord>,
     chunk_last_access: HashMap<ChunkCoord, i64>,
     clients: HashMap<String, mpsc::UnboundedSender<ServerMessage>>,
@@ -3022,6 +5004,10 @@ impl GameState {
             projectiles: HashMap::new(),
             resources: HashMap::new(),
             structure_tiles: HashMap::new(),
+            communities: HashMap::new(),
+            community_tiles: HashMap::new(),
+            storages: HashMap::new(),
+            pending_approvals: HashMap::new(),
             spawned_chunks: HashSet::new(),
             chunk_last_access: HashMap::new(),
             clients: HashMap::new(),
@@ -3064,6 +5050,7 @@ struct Player {
     face_y: f32,
     inventory: HashMap<String, i32>,
     completed_quests: HashSet<String>,
+    community_id: Option<String>,
     last_attack_ms: i64,
     last_gather_ms: i64,
     last_interact_ms: i64,
@@ -3087,6 +5074,7 @@ impl Player {
             face_y: 0.0,
             inventory: doc.inventory,
             completed_quests: doc.completed_quests.into_iter().collect(),
+            community_id: doc.community_id,
             last_attack_ms: 0,
             last_gather_ms: 0,
             last_interact_ms: 0,
@@ -3105,6 +5093,7 @@ impl Player {
         self.hp = doc.hp;
         self.inventory = doc.inventory.clone();
         self.completed_quests = doc.completed_quests.iter().cloned().collect();
+        self.community_id = doc.community_id.clone();
         self.last_inventory_hash = inventory_hash(&self.inventory);
         self.last_input_seq = 0;
     }
@@ -3118,6 +5107,7 @@ impl Player {
             hp: self.hp,
             inventory: self.inventory.clone(),
             completed_quests: self.completed_quests.iter().cloned().collect(),
+            community_id: self.community_id.clone(),
             coord_version: PLAYER_COORD_VERSION,
         }
     }
@@ -3130,6 +5120,7 @@ impl Player {
             y: self.y,
             hp: self.hp,
             inventory: self.inventory.clone(),
+            community_id: self.community_id.clone(),
         }
     }
 }
@@ -3241,6 +5232,52 @@ struct StructureDoc {
     x: i32,
     y: i32,
     owner_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct CommunityArea {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone)]
+struct Community {
+    id: String,
+    members: HashSet<String>,
+    areas: Vec<CommunityArea>,
+}
+
+#[derive(Debug, Clone)]
+struct Storage {
+    id: u64,
+    community_id: String,
+    inventory: HashMap<String, i32>,
+}
+
+#[derive(Debug, Clone)]
+enum ApprovalKind {
+    Join {
+        community_id: String,
+        target_id: String,
+        area: CommunityArea,
+        requester_id: String,
+    },
+    Build {
+        community_id: String,
+        build_kind: String,
+        x: i32,
+        y: i32,
+        requester_id: String,
+        participants: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PendingApproval {
+    kind: ApprovalKind,
+    approvals: HashSet<String>,
+    required: HashSet<String>,
+    created_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3446,6 +5483,8 @@ struct PlayerPublic {
     y: f32,
     hp: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    community_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     last_input_seq: Option<u32>,
 }
 
@@ -3457,6 +5496,7 @@ impl From<&Player> for PlayerPublic {
             x: player.x,
             y: player.y,
             hp: player.hp,
+            community_id: player.community_id.clone(),
             last_input_seq: None,
         }
     }
@@ -3471,6 +5511,8 @@ struct PlayerSelf {
     y: f32,
     hp: i32,
     inventory: HashMap<String, i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    community_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -3637,6 +5679,19 @@ enum ServerMessage {
     Chat {
         from: String,
         text: String,
+        channel: String,
+        community_member: bool,
+    },
+    ApprovalRequest {
+        request_id: String,
+        title: String,
+        text: String,
+        accept: String,
+        decline: String,
+    },
+    Storage {
+        storage_id: u64,
+        items: Vec<InventoryItem>,
     },
     Dialog {
         title: String,
@@ -3667,11 +5722,26 @@ enum ClientMessage {
     Chat {
         text: String,
     },
+    CommunityApproval {
+        request_id: String,
+        approve: bool,
+    },
+    CommunityLeave,
     SetName {
         name: String,
     },
     UseItem {
         id: String,
+    },
+    StorageDeposit {
+        storage_id: u64,
+        item_id: String,
+        count: i32,
+    },
+    StorageWithdraw {
+        storage_id: u64,
+        item_id: String,
+        count: i32,
     },
     Build {
         kind: String,
