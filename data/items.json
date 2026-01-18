@@ -30,9 +30,10 @@
   {
     "id": "boar_leg",
     "name": "Boar Leg",
-    "kind": "resource",
+    "kind": "food",
     "tool": null,
     "power": null,
+    "heal": 8,
     "weapon": null,
     "ammo_for": null
   },

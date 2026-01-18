@@ -397,6 +397,9 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                     Some(player) => player,
                     None => return,
                 };
+                if player.hp >= MAX_HP {
+                    return;
+                }
                 if !consume_item(&mut player.inventory, &id, 1) {
                     return;
                 }
