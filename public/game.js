@@ -25,6 +25,100 @@
   const buildMenuBaseTop = buildMenu
     ? Number.parseFloat(window.getComputedStyle(buildMenu).top) || buildMenu.offsetTop
     : 0;
+  const translations = {
+    en: {
+      statusConnecting: 'Connecting...',
+      statusConnected: 'Connected. Exploring...',
+      statusDisconnected: 'Disconnected. Reconnecting...',
+      statusSessionFailed: 'Failed to start session.',
+      panelInventory: 'Inventory',
+      panelBuild: 'Build',
+      panelChat: 'Chat',
+      toggleInventory: 'Toggle inventory',
+      toggleBuild: 'Toggle build menu',
+      toggleChat: 'Toggle chat',
+      uiScale: 'UI scale',
+      uiScaleDown: 'Scale UI down',
+      uiScaleUp: 'Scale UI up',
+      fullscreenEnter: 'Enter fullscreen',
+      fullscreenExit: 'Exit fullscreen',
+      namePlaceholder: 'Name',
+      nameAria: 'Player name',
+      nameSet: 'Set',
+      nameSetAria: 'Set name',
+      chatPlaceholder: 'Say something...',
+      buildStatusSelect: 'Select a build option.',
+      buildStatusDemolish: 'Click a structure twice to remove it.',
+      buildStatusPlace: 'Click the map to place.',
+      buildStatusNotConnected: 'Not connected.',
+      buildStatusDemolishConfirm: 'Click again to confirm demolition.',
+      buildStatusDemolishRequested: 'Demolition requested.',
+      buildStatusPlacementRequested: 'Placement requested.',
+      buildOptionHut: 'Wood Hut (20 wood)',
+      buildOptionHouse: 'Stone House (50 stone)',
+      buildOptionBridgeWood: 'Wood Bridge (10 wood)',
+      buildOptionBridgeStone: 'Stone Bridge (20 stone)',
+      buildOptionPath: 'Path (shovel)',
+      buildOptionRoad: 'Road (2 stone + shovel)',
+      buildOptionDemolish: 'Demolish',
+      actionAttack: 'Attack',
+      actionGather: 'Gather',
+      actionInteract: 'Interact',
+      helpTouch: 'Touch: drag screen or joystick to move · Tap Attack/Gather/Interact · Tap chat to type',
+      inventoryEmpty: 'Empty',
+      inventoryEat: 'Click to eat',
+      hpLabel: 'HP',
+    },
+    de: {
+      statusConnecting: 'Verbinde...',
+      statusConnected: 'Verbunden. Auf Erkundung...',
+      statusDisconnected: 'Getrennt. Verbinde neu...',
+      statusSessionFailed: 'Sitzung konnte nicht gestartet werden.',
+      panelInventory: 'Inventar',
+      panelBuild: 'Bauen',
+      panelChat: 'Chat',
+      toggleInventory: 'Inventar ein-/ausblenden',
+      toggleBuild: 'Bau-Menü ein-/ausblenden',
+      toggleChat: 'Chat ein-/ausblenden',
+      uiScale: 'UI-Skalierung',
+      uiScaleDown: 'UI verkleinern',
+      uiScaleUp: 'UI vergrößern',
+      fullscreenEnter: 'Vollbild aktivieren',
+      fullscreenExit: 'Vollbild verlassen',
+      namePlaceholder: 'Name',
+      nameAria: 'Spielername',
+      nameSet: 'Setzen',
+      nameSetAria: 'Name setzen',
+      chatPlaceholder: 'Sag etwas...',
+      buildStatusSelect: 'Bauoption wählen.',
+      buildStatusDemolish: 'Gebäude doppelt anklicken zum Entfernen.',
+      buildStatusPlace: 'Karte zum Platzieren anklicken.',
+      buildStatusNotConnected: 'Nicht verbunden.',
+      buildStatusDemolishConfirm: 'Nochmal klicken zum Bestätigen.',
+      buildStatusDemolishRequested: 'Abriss angefragt.',
+      buildStatusPlacementRequested: 'Platzierung angefragt.',
+      buildOptionHut: 'Holzhütte (20 Holz)',
+      buildOptionHouse: 'Steinhaus (50 Stein)',
+      buildOptionBridgeWood: 'Holzbrücke (10 Holz)',
+      buildOptionBridgeStone: 'Steinbrücke (20 Stein)',
+      buildOptionPath: 'Pfad (Schaufel)',
+      buildOptionRoad: 'Straße (2 Stein + Schaufel)',
+      buildOptionDemolish: 'Abriss',
+      actionAttack: 'Angriff',
+      actionGather: 'Sammeln',
+      actionInteract: 'Interagieren',
+      helpTouch: 'Touch: Bildschirm oder Joystick ziehen zum Laufen · Angriff/Sammeln/Interagieren tippen · Chat zum Tippen antippen',
+      inventoryEmpty: 'Leer',
+      inventoryEat: 'Klicken zum Essen',
+      hpLabel: 'HP',
+    },
+  };
+  const locale =
+    (navigator.languages && navigator.languages[0]) || navigator.language || 'en';
+  const language = locale.toLowerCase().startsWith('de') ? 'de' : 'en';
+  const strings = translations[language] || translations.en;
+  const t = (key) => strings[key] || translations.en[key] || key;
+  document.documentElement.lang = language;
 
   let dialogTimer = null;
   let ws = null;
@@ -194,6 +288,100 @@
   let lastInputDir = { x: 0, y: 0 };
   let localRenderOffset = { x: 0, y: 0 };
 
+  function applyLocale() {
+    if (statusEl) {
+      statusEl.textContent = t('statusConnecting');
+    }
+    const inventoryTitle = inventoryPanel?.querySelector('.panel-title');
+    if (inventoryTitle) {
+      inventoryTitle.textContent = t('panelInventory');
+    }
+    const buildTitle = buildMenu?.querySelector('.panel-title');
+    if (buildTitle) {
+      buildTitle.textContent = t('panelBuild');
+    }
+    const chatTitle = document.querySelector('#chat .panel-title');
+    if (chatTitle) {
+      chatTitle.textContent = t('panelChat');
+    }
+    const inventoryToggle = document.querySelector('[data-panel="inventory"]');
+    if (inventoryToggle) {
+      inventoryToggle.setAttribute('aria-label', t('toggleInventory'));
+      inventoryToggle.setAttribute('title', t('toggleInventory'));
+    }
+    const buildToggle = document.querySelector('[data-panel="build-menu"]');
+    if (buildToggle) {
+      buildToggle.setAttribute('aria-label', t('toggleBuild'));
+      buildToggle.setAttribute('title', t('toggleBuild'));
+    }
+    const chatToggle = document.querySelector('[data-panel="chat"]');
+    if (chatToggle) {
+      chatToggle.setAttribute('aria-label', t('toggleChat'));
+      chatToggle.setAttribute('title', t('toggleChat'));
+    }
+    const uiScalePanel = document.getElementById('ui-scale-control');
+    if (uiScalePanel) {
+      uiScalePanel.setAttribute('aria-label', t('uiScale'));
+    }
+    if (uiScaleDown) {
+      uiScaleDown.setAttribute('aria-label', t('uiScaleDown'));
+      uiScaleDown.setAttribute('title', t('uiScaleDown'));
+    }
+    if (uiScaleUp) {
+      uiScaleUp.setAttribute('aria-label', t('uiScaleUp'));
+      uiScaleUp.setAttribute('title', t('uiScaleUp'));
+    }
+    if (fullscreenButton) {
+      updateFullscreenButton();
+    }
+    if (nameInput) {
+      nameInput.placeholder = t('namePlaceholder');
+      nameInput.setAttribute('aria-label', t('nameAria'));
+    }
+    if (nameSave) {
+      nameSave.textContent = t('nameSet');
+      nameSave.setAttribute('aria-label', t('nameSetAria'));
+    }
+    if (chatInput) {
+      chatInput.placeholder = t('chatPlaceholder');
+    }
+    if (buildStatus) {
+      buildStatus.textContent = t('buildStatusSelect');
+    }
+    const buildLabels = {
+      hut_wood: t('buildOptionHut'),
+      house_stone: t('buildOptionHouse'),
+      bridge_wood: t('buildOptionBridgeWood'),
+      bridge_stone: t('buildOptionBridgeStone'),
+      path: t('buildOptionPath'),
+      road: t('buildOptionRoad'),
+      demolish: t('buildOptionDemolish'),
+    };
+    buildButtons.forEach((button) => {
+      const label = buildLabels[button.dataset.build];
+      if (label) {
+        button.textContent = label;
+      }
+    });
+    actionButtons.forEach((button) => {
+      const label = button.querySelector('.action-label');
+      if (!label) return;
+      switch (button.dataset.action) {
+        case 'attack':
+          label.textContent = t('actionAttack');
+          break;
+        case 'gather':
+          label.textContent = t('actionGather');
+          break;
+        case 'interact':
+          label.textContent = t('actionInteract');
+          break;
+        default:
+          break;
+      }
+    });
+  }
+
   function worldToPixels(x, y) {
     return {
       x: x * tileSize,
@@ -303,7 +491,7 @@
     if (!items || items.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'empty';
-      empty.textContent = 'Empty';
+      empty.textContent = t('inventoryEmpty');
       inventoryList.appendChild(empty);
       return;
     }
@@ -321,7 +509,7 @@
         row.classList.add('is-usable');
         row.setAttribute('role', 'button');
         row.setAttribute('tabindex', '0');
-        row.title = 'Click to eat';
+        row.title = t('inventoryEat');
         row.addEventListener('click', () => {
           sendMessage({ type: 'use_item', id: item.id });
         });
@@ -347,13 +535,13 @@
       button.classList.toggle('active', button.dataset.build === buildMode);
     });
     if (!buildMode) {
-      setBuildStatus('Select a build option.');
+      setBuildStatus(t('buildStatusSelect'));
       clearBuildPreview();
     } else if (buildMode === 'demolish') {
-      setBuildStatus('Click a structure twice to remove it.');
+      setBuildStatus(t('buildStatusDemolish'));
       clearBuildPreview();
     } else {
-      setBuildStatus('Click the map to place.');
+      setBuildStatus(t('buildStatusPlace'));
       updateBuildPreview(lastPointerTile);
     }
   }
@@ -455,7 +643,7 @@
   function handleBuildClick(event) {
     if (!buildMode) return false;
     if (!wsOpen) {
-      setBuildStatus('Not connected.');
+      setBuildStatus(t('buildStatusNotConnected'));
       return true;
     }
     const tile = screenToTile(event);
@@ -472,16 +660,16 @@
           y: tile.y,
           expires: now + 1200,
         };
-        setBuildStatus('Click again to confirm demolition.');
+        setBuildStatus(t('buildStatusDemolishConfirm'));
         return true;
       }
       sendMessage({ type: 'demolish', x: tile.x, y: tile.y });
       pendingDemolish = null;
-      setBuildStatus('Demolition requested.');
+      setBuildStatus(t('buildStatusDemolishRequested'));
       return true;
     }
     sendMessage({ type: 'build', kind: buildMode, x: tile.x, y: tile.y });
-    setBuildStatus('Placement requested.');
+    setBuildStatus(t('buildStatusPlacementRequested'));
     return true;
   }
 
@@ -645,7 +833,7 @@
     const active = Boolean(getFullscreenElement());
     fullscreenButton.classList.toggle('active', active);
     fullscreenButton.setAttribute('aria-pressed', String(active));
-    const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
+    const label = active ? t('fullscreenExit') : t('fullscreenEnter');
     fullscreenButton.setAttribute('aria-label', label);
     fullscreenButton.setAttribute('title', label);
   }
@@ -1634,7 +1822,8 @@
 
     ws.addEventListener('open', () => {
       wsOpen = true;
-      statusEl.textContent = 'Connected. Exploring...';
+      statusEl.textContent = t('statusConnected');
+      sendMessage({ type: 'locale', language });
       if (pendingName) {
         sendMessage({ type: 'set_name', name: pendingName });
       }
@@ -1662,7 +1851,7 @@
             renderInventory(msg.inventory_items);
           }
           msg.npcs.forEach((npc) => addNpc(npc));
-          statusEl.textContent = `HP ${msg.player.hp}`;
+          statusEl.textContent = `${t('hpLabel')} ${msg.player.hp}`;
           syncPlayers([msg.player], false);
           requestChunksAround();
           break;
@@ -1732,7 +1921,7 @@
 
     ws.addEventListener('close', () => {
       wsOpen = false;
-      statusEl.textContent = 'Disconnected. Reconnecting...';
+      statusEl.textContent = t('statusDisconnected');
       localPrediction = null;
       pendingInputs.length = 0;
       inputSeq = 0;
@@ -1744,7 +1933,7 @@
   }
 
   if (helpEl && window.matchMedia('(pointer: coarse)').matches) {
-    helpEl.textContent = 'Touch: drag screen or joystick to move · Tap Attack/Gather/Interact · Tap chat to type';
+    helpEl.textContent = t('helpTouch');
   }
 
   if (fullscreenButton) {
@@ -2004,7 +2193,7 @@
       const playerEntity = playerEntities.get(playerId);
       if (playerEntity) {
         const hp = playerEntity.hp != null ? playerEntity.hp : playerState?.hp ?? 0;
-        statusEl.textContent = `HP ${hp} | ${playerEntity.x.toFixed(1)}, ${playerEntity.y.toFixed(1)}`;
+        statusEl.textContent = `${t('hpLabel')} ${hp} | ${playerEntity.x.toFixed(1)}, ${playerEntity.y.toFixed(1)}`;
       }
       lastStatusUpdate = now;
     }
@@ -2014,6 +2203,7 @@
     }
   });
 
+  applyLocale();
   if (inventoryPanel) {
     inventoryPanel.classList.add('collapsed');
   }
@@ -2052,6 +2242,6 @@
       connect();
     })
     .catch(() => {
-      statusEl.textContent = 'Failed to start session.';
+      statusEl.textContent = t('statusSessionFailed');
     });
 })();

@@ -52,6 +52,36 @@ const TILE_SAND: u8 = 2;
 const TILE_DIRT: u8 = 3;
 const TILE_FLOWER: u8 = 4;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Language {
+    En,
+    De,
+}
+
+fn language_from_tag(tag: &str) -> Language {
+    let lowered = tag.trim().to_ascii_lowercase();
+    if lowered.starts_with("de") {
+        Language::De
+    } else {
+        Language::En
+    }
+}
+
+fn language_from_headers(headers: &HeaderMap) -> Language {
+    let value = headers
+        .get("accept-language")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    for part in value.split(',') {
+        let token = part.split(';').next().unwrap_or("").trim();
+        if token.is_empty() {
+            continue;
+        }
+        return language_from_tag(token);
+    }
+    Language::En
+}
+
 #[derive(Clone)]
 struct AppState {
     state: Arc<RwLock<GameState>>,
@@ -154,10 +184,11 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let sid = extract_session_id(&headers).unwrap_or_else(|| Uuid::new_v4().to_string());
-    ws.on_upgrade(move |socket| handle_socket(socket, app_state, sid))
+    let language = language_from_headers(&headers);
+    ws.on_upgrade(move |socket| handle_socket(socket, app_state, sid, language))
 }
 
-async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
+async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String, language: Language) {
     let (mut socket_sender, mut socket_receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
@@ -167,6 +198,7 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
         state
             .visibility
             .insert(sid.clone(), VisibilityState::default());
+        state.locales.insert(sid.clone(), language);
     }
 
     let send_task = tokio::spawn(async move {
@@ -199,6 +231,7 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
             .inputs
             .entry(sid.clone())
             .or_insert(InputState::default());
+        let lang = player_language(&state, &sid);
         let player = state
             .players
             .entry(sid.clone())
@@ -211,16 +244,21 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
                 .data
                 .npcs
                 .iter()
-                .cloned()
-                .map(NpcPublic::from)
+                .map(|npc| NpcPublic {
+                    id: npc.id.clone(),
+                    name: localize_npc_name(npc, lang),
+                    x: npc.x,
+                    y: npc.y,
+                    dialog: localize_npc_dialog(npc, lang),
+                })
                 .collect(),
-            inventory_items: build_inventory_items(&player.inventory, app_state.data.as_ref()),
+            inventory_items: build_inventory_items(&player.inventory, app_state.data.as_ref(), lang),
         }
     };
 
     send_to_player(&app_state.state, &sid, welcome_msg).await;
     let inventory_msg = ServerMessage::Inventory {
-        items: build_inventory_items(&doc.inventory, app_state.data.as_ref()),
+        items: build_inventory_items(&doc.inventory, app_state.data.as_ref(), language),
     };
     send_to_player(&app_state.state, &sid, inventory_msg).await;
 
@@ -241,6 +279,7 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
         state.clients.remove(&sid);
         state.inputs.remove(&sid);
         state.visibility.remove(&sid);
+        state.locales.remove(&sid);
         if let Some(player) = state.players.remove(&sid) {
             let doc = player.to_doc();
             let store = app_state.store.clone();
@@ -346,15 +385,13 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
             }
         }
         ClientMessage::UseItem { id } => {
-            let (item_name, heal_amount) = match app_state.data.items.get(&id) {
-                Some(def) => (def.name.clone(), def.heal),
-                None => return,
-            };
-            let heal_amount = match heal_amount {
+            let heal_amount = match app_state.data.items.get(&id).and_then(|def| def.heal) {
                 Some(amount) if amount > 0 => amount,
                 _ => return,
             };
             let mut state = app_state.state.write().await;
+            let lang = player_language(&state, sid);
+            let item_name = localize_item_name(app_state.data.as_ref(), &id, lang);
             let (items, player_id, message) = {
                 let player = match state.players.get_mut(sid) {
                     Some(player) => player,
@@ -366,14 +403,13 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                 let hp_before = player.hp;
                 player.hp = (player.hp + heal_amount).min(MAX_HP);
                 player.last_inventory_hash = inventory_hash(&player.inventory);
-                let items = build_inventory_items(&player.inventory, app_state.data.as_ref());
+                let items =
+                    build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
                 let player_id = player.id.clone();
                 let message = if id == "apple" {
-                    "You eat an apple. An apple a day keeps the doctor away.".to_string()
-                } else if player.hp > hp_before {
-                    format!("You eat {} and feel better.", item_name)
+                    message_eat_apple(lang)
                 } else {
-                    format!("You eat {}.", item_name)
+                    message_eat_item(&item_name, player.hp > hp_before, lang)
                 };
                 (items, player_id, message)
             };
@@ -409,6 +445,18 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
                         typing,
                     },
                 );
+            }
+        }
+        ClientMessage::Locale { language } => {
+            let mut state = app_state.state.write().await;
+            let lang = language_from_tag(&language);
+            state.locales.insert(sid.to_string(), lang);
+            if let Some(player) = state.players.get(sid) {
+                let items =
+                    build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
+                if let Some(sender) = state.clients.get(sid) {
+                    let _ = sender.send(ServerMessage::Inventory { items });
+                }
             }
         }
         ClientMessage::ChunkRequest { chunks } => {
@@ -493,9 +541,10 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     let mut cost = Vec::new();
     let mut require_shovel = false;
     let mut requires_land = true;
+    let lang = player_language(&state, &player_id);
 
     let build_kind = kind.as_str();
-    let success_message = match build_kind {
+    match build_kind {
         "hut_wood" => {
             cost.push(ItemStack {
                 id: "wood".to_string(),
@@ -521,7 +570,6 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                     placements.push((coord, kind.to_string()));
                 }
             }
-            "You build a wooden hut."
         }
         "house_stone" => {
             cost.push(ItemStack {
@@ -548,7 +596,6 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                     placements.push((coord, kind.to_string()));
                 }
             }
-            "You build a stone house."
         }
         "bridge_wood" => {
             cost.push(ItemStack {
@@ -562,12 +609,11 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                     send_system_message(
                         &mut state,
                         &player_id,
-                        "Bridges must span 1-4 water tiles with land on both ends.".to_string(),
+                        message_bridge_span_error(lang).to_string(),
                     );
                     return;
                 }
             }
-            "You build a wooden bridge."
         }
         "bridge_stone" => {
             cost.push(ItemStack {
@@ -581,19 +627,17 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                     send_system_message(
                         &mut state,
                         &player_id,
-                        "Bridges must span 1-4 water tiles with land on both ends.".to_string(),
+                        message_bridge_span_error(lang).to_string(),
                     );
                     return;
                 }
             }
-            "You build a stone bridge."
         }
         "path" => {
             require_shovel = true;
             let coord = TileCoord { x, y };
             tiles.push(coord);
             placements.push((coord, "path".to_string()));
-            "You lay down a path."
         }
         "road" => {
             require_shovel = true;
@@ -604,10 +648,13 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             let coord = TileCoord { x, y };
             tiles.push(coord);
             placements.push((coord, "road".to_string()));
-            "You build a road."
         }
         _ => {
-            send_system_message(&mut state, &player_id, "Unknown build option.".to_string());
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_unknown_build(lang).to_string(),
+            );
             return;
         }
     };
@@ -637,7 +684,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         send_system_message(
             &mut state,
             &player_id,
-            "You need a shovel.".to_string(),
+            message_need_shovel(lang).to_string(),
         );
         return;
     }
@@ -646,7 +693,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         send_system_message(
             &mut state,
             &player_id,
-            "You don't have enough materials.".to_string(),
+            message_not_enough_materials(lang).to_string(),
         );
         return;
     }
@@ -659,7 +706,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             send_system_message(
                 &mut state,
                 &player_id,
-                "That spot is already occupied.".to_string(),
+                message_spot_occupied(lang).to_string(),
             );
             return;
         }
@@ -667,7 +714,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             send_system_message(
                 &mut state,
                 &player_id,
-                "Clear the resource first.".to_string(),
+                message_clear_resource(lang).to_string(),
             );
             return;
         }
@@ -675,7 +722,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             send_system_message(
                 &mut state,
                 &player_id,
-                "You can only build that on land.".to_string(),
+                message_build_on_land(lang).to_string(),
             );
             return;
         }
@@ -700,14 +747,14 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                 Vec::new()
             } else {
                 player.last_inventory_hash = inventory_hash(&player.inventory);
-                build_inventory_items(&player.inventory, app_state.data.as_ref())
+                build_inventory_items(&player.inventory, app_state.data.as_ref(), lang)
             }
         };
         if removal_failed {
             send_system_message(
                 &mut state,
                 &player_id,
-                "You don't have enough materials.".to_string(),
+                message_not_enough_materials(lang).to_string(),
             );
             return;
         }
@@ -754,7 +801,11 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             state: "added".to_string(),
         },
     );
-    send_system_message(&mut state, &player_id, success_message.to_string());
+    send_system_message(
+        &mut state,
+        &player_id,
+        message_build_success(lang, build_kind),
+    );
 
     let docs: Vec<StructureDoc> = new_tiles
         .into_iter()
@@ -778,11 +829,12 @@ async fn handle_demolish_request(app_state: &AppState, sid: &str, x: i32, y: i32
         Some(player) => player.id.clone(),
         None => return,
     };
+    let lang = player_language(&state, &player_id);
     let tile = TileCoord { x, y };
     let structure = match state.structure_tiles.get(&tile) {
         Some(structure) => structure.clone(),
         None => {
-            send_system_message(&mut state, &player_id, "Nothing to remove.".to_string());
+            send_system_message(&mut state, &player_id, message_nothing_to_remove(lang).to_string());
             return;
         }
     };
@@ -790,7 +842,7 @@ async fn handle_demolish_request(app_state: &AppState, sid: &str, x: i32, y: i32
         send_system_message(
             &mut state,
             &player_id,
-            "You can only remove your own buildings.".to_string(),
+            message_remove_own_only(lang).to_string(),
         );
         return;
     }
@@ -834,7 +886,11 @@ async fn handle_demolish_request(app_state: &AppState, sid: &str, x: i32, y: i32
             state: "removed".to_string(),
         },
     );
-    send_system_message(&mut state, &player_id, "Structure removed.".to_string());
+    send_system_message(
+        &mut state,
+        &player_id,
+        message_structure_removed(lang).to_string(),
+    );
 
     let store = app_state.store.clone();
     tokio::spawn(async move {
@@ -993,7 +1049,9 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                 if next_inventory_hash != prev_inventory_hash {
                     player.last_inventory_hash = next_inventory_hash;
                     if let Some(sender) = state.clients.get(&id) {
-                        let items = build_inventory_items(&player.inventory, app_state.data.as_ref());
+                        let lang = player_language(&state, &id);
+                        let items =
+                            build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
                         let _ = sender.send(ServerMessage::Inventory { items });
                     }
                 }
@@ -1235,6 +1293,7 @@ fn handle_player_actions(
     data: &GameData,
 ) {
     if input.gather && now_ms - player.last_gather_ms >= 400 {
+        let lang = player_language(state, &player.id);
         let mut messages = Vec::new();
         let mut resource_update: Option<(ResourceNodePublic, String)> = None;
         let mut did_gather = false;
@@ -1255,17 +1314,22 @@ fn handle_player_actions(
                         for drop in &def.drops {
                             let count = drop.count * yield_multiplier;
                             add_item(&mut player.inventory, &drop.id, count);
-                            messages.push(format!("Collected {} x{}", drop.id, count));
+                            let item_name =
+                                localize_item_name(data, &drop.id, lang);
+                            messages.push(message_collected(&item_name, count, lang));
                         }
                         resource_update = Some((
                             ResourceNodePublic::from(resource.clone()),
                             "removed".to_string(),
                         ));
                     } else {
-                        messages.push(format!("Hit {} ({})", def.name, resource.hp));
+                        let resource_name =
+                            localize_resource_name(data, &resource.kind, lang);
+                        messages.push(message_hit_resource(&resource_name, resource.hp, lang));
                     }
                 } else {
-                    messages.push(format!("You need a {}", def.tool));
+                    let tool_name = localize_tool_name(&def.tool, lang);
+                    messages.push(message_need_tool(&tool_name, lang));
                 }
             }
         }
@@ -1322,7 +1386,8 @@ fn handle_player_actions(
         let (spawn_x, spawn_y) = spawn_near_campfire(world, noise);
         player.x = spawn_x;
         player.y = spawn_y;
-        send_system_message(state, &player.id, "You wake up by the campfire.".to_string());
+        let lang = player_language(state, &player.id);
+        send_system_message(state, &player.id, message_wake_up(lang).to_string());
     }
 }
 
@@ -1377,7 +1442,7 @@ fn update_monsters(
                 if nearest_dist <= MONSTER_ATTACK_RANGE
                     && now_ms - monster.last_attack_ms >= 800
                 {
-                    damage_events.push((target_id.clone(), def.damage, def.name.clone()));
+                    damage_events.push((target_id.clone(), def.damage, monster.kind.clone()));
                     monster.last_attack_ms = now_ms;
                 }
             } else {
@@ -1402,10 +1467,15 @@ fn update_monsters(
         }
     }
 
-    for (player_id, damage, monster_name) in damage_events {
+    for (player_id, damage, monster_id) in damage_events {
+        let lang = player_language(state, &player_id);
+        let monster_name = localize_monster_name(data, &monster_id, lang);
         let message = if let Some(player) = state.players.get_mut(&player_id) {
             player.hp -= damage;
-            Some((player.id.clone(), format!("{} hits you ({})", monster_name, player.hp.max(0))))
+            Some((
+                player.id.clone(),
+                message_monster_hits_you(&monster_name, player.hp.max(0), lang),
+            ))
         } else {
             None
         };
@@ -1560,6 +1630,7 @@ fn attack_monster_melee(
     weapon: &WeaponStats,
     data: &GameData,
 ) -> bool {
+    let lang = player_language(state, &player.id);
     let mut target_id = None;
     let mut nearest_dist = f32::MAX;
     for (id, monster) in state.monsters.iter() {
@@ -1575,7 +1646,8 @@ fn attack_monster_melee(
         let mut killed = false;
         if let Some(monster) = state.monsters.get_mut(&monster_id) {
             monster.hp -= weapon.damage;
-            message = Some(format!("Hit {} ({})", monster.kind, monster.hp.max(0)));
+            let monster_name = localize_monster_name(data, &monster.kind, lang);
+            message = Some(message_hit_monster(&monster_name, monster.hp.max(0), lang));
             if monster.hp <= 0 {
                 killed = true;
             }
@@ -1607,11 +1679,9 @@ fn try_ranged_attack(
     }
 
     if !consume_item(&mut player.inventory, &ammo_id, 1) {
-        send_system_message(
-            state,
-            &player.id,
-            format!("Out of {}", ammo_id),
-        );
+        let lang = player_language(state, &player.id);
+        let item_name = localize_item_name(data, &ammo_id, lang);
+        send_system_message(state, &player.id, message_out_of(&item_name, lang));
         return false;
     }
 
@@ -1649,11 +1719,16 @@ fn handle_monster_death(
     if let Some(monster) = state.monsters.remove(&monster_id) {
         if let Some(def) = data.monsters.get(&monster.kind) {
             if let Some(drop) = &def.drop {
-                let message = format!("Picked up {} x{}", drop.id, drop.count);
                 if let Some(player) = award_to.as_deref_mut() {
                     add_item(&mut player.inventory, &drop.id, drop.count);
                     let player_id = player.id.clone();
-                    send_system_message(state, &player_id, message);
+                    let lang = player_language(state, &player_id);
+                    let item_name = localize_item_name(data, &drop.id, lang);
+                    send_system_message(
+                        state,
+                        &player_id,
+                        message_picked_up(&item_name, drop.count, lang),
+                    );
                 } else {
                     let mut awarded_to = None;
                     for player in state.players.values_mut() {
@@ -1665,7 +1740,13 @@ fn handle_monster_death(
                         }
                     }
                     if let Some(player_id) = awarded_to {
-                        send_system_message(state, &player_id, message);
+                        let lang = player_language(state, &player_id);
+                        let item_name = localize_item_name(data, &drop.id, lang);
+                        send_system_message(
+                            state,
+                            &player_id,
+                            message_picked_up(&item_name, drop.count, lang),
+                        );
                     }
                 }
             }
@@ -1674,9 +1755,12 @@ fn handle_monster_death(
 }
 
 fn handle_npc_interaction(player: &mut Player, npc: &NpcDef, state: &mut GameState, data: &GameData) {
+    let lang = player_language(state, &player.id);
+    let npc_name = localize_npc_name(npc, lang);
+    let npc_dialog = localize_npc_dialog(npc, lang);
     if let Some(quest) = data.quests_by_npc.get(&npc.id) {
         if player.completed_quests.contains(&quest.id) {
-            send_dialog(state, &player.id, &npc.name, "Thanks again for your help.");
+            send_dialog(state, &player.id, &npc_name, &message_thanks_again(lang));
             return;
         }
 
@@ -1689,31 +1773,44 @@ fn handle_npc_interaction(player: &mut Player, npc: &NpcDef, state: &mut GameSta
             send_dialog(
                 state,
                 &player.id,
-                &npc.name,
-                &format!("Quest complete! {}", quest.description),
+                &npc_name,
+                &message_quest_complete(
+                    &localize_quest_name(quest, lang),
+                    &localize_quest_description(quest, lang),
+                    lang,
+                ),
             );
             for reward in &quest.rewards {
+                let lang = player_language(state, &player.id);
+                let item_name = localize_item_name(data, &reward.id, lang);
                 send_system_message(
                     state,
                     &player.id,
-                    format!("Reward: {} x{}", reward.id, reward.count),
+                    message_reward(&item_name, reward.count, lang),
                 );
             }
         } else {
             let mut needs = Vec::new();
             for req in &quest.requires {
                 let have = player.inventory.get(&req.id).copied().unwrap_or(0);
-                needs.push(format!("{} {}/{}", req.id, have, req.count));
+                let lang = player_language(state, &player.id);
+                let item_name = localize_item_name(data, &req.id, lang);
+                needs.push(format!("{} {}/{}", item_name, have, req.count));
             }
             send_dialog(
                 state,
                 &player.id,
-                &npc.name,
-                &format!("{}\nNeeds: {}", quest.description, needs.join(", ")),
+                &npc_name,
+                &message_quest_needs(
+                    &localize_quest_name(quest, lang),
+                    &localize_quest_description(quest, lang),
+                    &needs.join(", "),
+                    lang,
+                ),
             );
         }
     } else {
-        send_dialog(state, &player.id, &npc.name, &npc.dialog);
+        send_dialog(state, &player.id, &npc_name, &npc_dialog);
     }
 }
 
@@ -1873,14 +1970,18 @@ fn inventory_hash(inventory: &HashMap<String, i32>) -> u64 {
     hasher.finish()
 }
 
-fn build_inventory_items(inventory: &HashMap<String, i32>, data: &GameData) -> Vec<InventoryItem> {
+fn build_inventory_items(
+    inventory: &HashMap<String, i32>,
+    data: &GameData,
+    lang: Language,
+) -> Vec<InventoryItem> {
     let mut items = Vec::new();
     for (id, count) in inventory {
         if *count <= 0 {
             continue;
         }
         let (name, heal) = match data.items.get(id) {
-            Some(def) => (def.name.clone(), def.heal),
+            Some(def) => (localize_item_name(data, &def.id, lang), def.heal),
             None => (id.clone(), None),
         };
         items.push(InventoryItem {
@@ -1892,6 +1993,344 @@ fn build_inventory_items(inventory: &HashMap<String, i32>, data: &GameData) -> V
     }
     items.sort_by(|a, b| a.name.cmp(&b.name));
     items
+}
+
+fn player_language(state: &GameState, player_id: &str) -> Language {
+    state.locales.get(player_id).copied().unwrap_or(Language::En)
+}
+
+fn localize_item_name(data: &GameData, item_id: &str, lang: Language) -> String {
+    if lang != Language::De {
+        return data
+            .items
+            .get(item_id)
+            .map(|def| def.name.clone())
+            .unwrap_or_else(|| item_id.to_string());
+    }
+    let localized = match item_id {
+        "wood" => "Holz",
+        "apple" => "Apfel",
+        "stone" => "Stein",
+        "boar_leg" => "Wildschweinkeule",
+        "slime_core" => "Schleimkern",
+        "arrow" => "Pfeil",
+        "basic_axe" => "Einfache Axt",
+        "fine_axe" => "Gute Axt",
+        "basic_pick" => "Einfache Spitzhacke",
+        "basic_shovel" => "Schaufel",
+        "rusty_sword" => "Rostiges Schwert",
+        "iron_sword" => "Eisenschwert",
+        "bow" => "Bogen",
+        _ => return data
+            .items
+            .get(item_id)
+            .map(|def| def.name.clone())
+            .unwrap_or_else(|| item_id.to_string()),
+    };
+    localized.to_string()
+}
+
+fn localize_resource_name(data: &GameData, resource_id: &str, lang: Language) -> String {
+    if lang != Language::De {
+        return data
+            .resources
+            .get(resource_id)
+            .map(|def| def.name.clone())
+            .unwrap_or_else(|| resource_id.to_string());
+    }
+    let localized = match resource_id {
+        "tree" => "Baum",
+        "apple_tree" => "Apfelbaum",
+        "pine_tree" => "Kiefer",
+        "palm_tree" => "Palme",
+        "rock" => "Fels",
+        _ => return data
+            .resources
+            .get(resource_id)
+            .map(|def| def.name.clone())
+            .unwrap_or_else(|| resource_id.to_string()),
+    };
+    localized.to_string()
+}
+
+fn localize_monster_name(data: &GameData, monster_id: &str, lang: Language) -> String {
+    if lang != Language::De {
+        return data
+            .monsters
+            .get(monster_id)
+            .map(|def| def.name.clone())
+            .unwrap_or_else(|| monster_id.to_string());
+    }
+    let localized = match monster_id {
+        "boar" => "Wildschwein",
+        _ => return data
+            .monsters
+            .get(monster_id)
+            .map(|def| def.name.clone())
+            .unwrap_or_else(|| monster_id.to_string()),
+    };
+    localized.to_string()
+}
+
+fn localize_tool_name(tool: &str, lang: Language) -> String {
+    if lang != Language::De {
+        return tool.to_string();
+    }
+    let localized = match tool {
+        "axe" => "Axt",
+        "pick" => "Spitzhacke",
+        "shovel" => "Schaufel",
+        _ => tool,
+    };
+    localized.to_string()
+}
+
+fn localize_npc_name(npc: &NpcDef, lang: Language) -> String {
+    if lang != Language::De {
+        return npc.name.clone();
+    }
+    let localized = match npc.id.as_str() {
+        "npc_logger" => "Edda die Holzfällerin",
+        "npc_hunter" => "Bram der Jäger",
+        _ => return npc.name.clone(),
+    };
+    localized.to_string()
+}
+
+fn localize_npc_dialog(npc: &NpcDef, lang: Language) -> String {
+    if lang != Language::De {
+        return npc.dialog.clone();
+    }
+    let localized = match npc.id.as_str() {
+        "npc_logger" => "Pfadwege halten uns in Bewegung. Bring mir Holz und Stein, dann baue ich eine Schaufel.",
+        "npc_hunter" => "Wildschweine streifen durchs Dickicht. Bring mir ihre Keulen.",
+        _ => return npc.dialog.clone(),
+    };
+    localized.to_string()
+}
+
+fn localize_quest_name(quest: &QuestDef, lang: Language) -> String {
+    if lang != Language::De {
+        return quest.name.clone();
+    }
+    let localized = match quest.id.as_str() {
+        "quest_lumber" => "Holz für das Lager",
+        "quest_shovel" => "Pfadbereiter",
+        "quest_hunter" => "Wildschweinkeulen",
+        _ => return quest.name.clone(),
+    };
+    localized.to_string()
+}
+
+fn localize_quest_description(quest: &QuestDef, lang: Language) -> String {
+    if lang != Language::De {
+        return quest.description.clone();
+    }
+    let localized = match quest.id.as_str() {
+        "quest_lumber" => "Bring 5 Holz zu Edda.",
+        "quest_shovel" => "Bring 6 Holz und 4 Stein, damit Edda eine Schaufel bauen kann.",
+        "quest_hunter" => "Bring 3 Wildschweinkeulen zu Bram.",
+        _ => return quest.description.clone(),
+    };
+    localized.to_string()
+}
+
+fn message_build_success(lang: Language, kind: &str) -> String {
+    match lang {
+        Language::De => match kind {
+            "hut_wood" => "Du baust eine Holzhütte.".to_string(),
+            "house_stone" => "Du baust ein Steinhaus.".to_string(),
+            "bridge_wood" => "Du baust eine Holzbrücke.".to_string(),
+            "bridge_stone" => "Du baust eine Steinbrücke.".to_string(),
+            "path" => "Du legst einen Pfad an.".to_string(),
+            "road" => "Du baust eine Straße.".to_string(),
+            _ => "Unbekannte Bauoption.".to_string(),
+        },
+        Language::En => match kind {
+            "hut_wood" => "You build a wooden hut.".to_string(),
+            "house_stone" => "You build a stone house.".to_string(),
+            "bridge_wood" => "You build a wooden bridge.".to_string(),
+            "bridge_stone" => "You build a stone bridge.".to_string(),
+            "path" => "You lay down a path.".to_string(),
+            "road" => "You build a road.".to_string(),
+            _ => "Unknown build option.".to_string(),
+        },
+    }
+}
+
+fn message_bridge_span_error(lang: Language) -> &'static str {
+    match lang {
+        Language::De => {
+            "Brücken müssen 1-4 Wasserfelder überspannen und an beiden Enden Land haben."
+        }
+        Language::En => "Bridges must span 1-4 water tiles with land on both ends.",
+    }
+}
+
+fn message_need_shovel(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du brauchst eine Schaufel.",
+        Language::En => "You need a shovel.",
+    }
+}
+
+fn message_not_enough_materials(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du hast nicht genug Materialien.",
+        Language::En => "You don't have enough materials.",
+    }
+}
+
+fn message_spot_occupied(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Der Platz ist bereits belegt.",
+        Language::En => "That spot is already occupied.",
+    }
+}
+
+fn message_clear_resource(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Entferne zuerst die Ressource.",
+        Language::En => "Clear the resource first.",
+    }
+}
+
+fn message_build_on_land(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Das kannst du nur an Land bauen.",
+        Language::En => "You can only build that on land.",
+    }
+}
+
+fn message_unknown_build(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Unbekannte Bauoption.",
+        Language::En => "Unknown build option.",
+    }
+}
+
+fn message_nothing_to_remove(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Nichts zum Entfernen.",
+        Language::En => "Nothing to remove.",
+    }
+}
+
+fn message_remove_own_only(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du kannst nur deine eigenen Gebäude entfernen.",
+        Language::En => "You can only remove your own buildings.",
+    }
+}
+
+fn message_structure_removed(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Gebäude entfernt.",
+        Language::En => "Structure removed.",
+    }
+}
+
+fn message_wake_up(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du wachst am Lagerfeuer auf.",
+        Language::En => "You wake up by the campfire.",
+    }
+}
+
+fn message_collected(item_name: &str, count: i32, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Gesammelt: {} x{}", item_name, count),
+        Language::En => format!("Collected {} x{}", item_name, count),
+    }
+}
+
+fn message_hit_resource(resource_name: &str, hp: i32, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Getroffen: {} ({})", resource_name, hp),
+        Language::En => format!("Hit {} ({})", resource_name, hp),
+    }
+}
+
+fn message_need_tool(tool_name: &str, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Du brauchst eine {}.", tool_name),
+        Language::En => format!("You need a {}.", tool_name),
+    }
+}
+
+fn message_hit_monster(monster_name: &str, hp: i32, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Getroffen: {} ({})", monster_name, hp),
+        Language::En => format!("Hit {} ({})", monster_name, hp),
+    }
+}
+
+fn message_monster_hits_you(monster_name: &str, hp: i32, lang: Language) -> String {
+    match lang {
+        Language::De => format!("{} trifft dich ({})", monster_name, hp),
+        Language::En => format!("{} hits you ({})", monster_name, hp),
+    }
+}
+
+fn message_out_of(item_name: &str, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Keine {} mehr.", item_name),
+        Language::En => format!("Out of {}", item_name),
+    }
+}
+
+fn message_picked_up(item_name: &str, count: i32, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Aufgehoben: {} x{}", item_name, count),
+        Language::En => format!("Picked up {} x{}", item_name, count),
+    }
+}
+
+fn message_reward(item_name: &str, count: i32, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Belohnung: {} x{}", item_name, count),
+        Language::En => format!("Reward: {} x{}", item_name, count),
+    }
+}
+
+fn message_eat_apple(lang: Language) -> String {
+    match lang {
+        Language::De => "Du isst einen Apfel. Ein Apfel am Tag hält den Doktor fern."
+            .to_string(),
+        Language::En => {
+            "You eat an apple. An apple a day keeps the doctor away.".to_string()
+        }
+    }
+}
+
+fn message_eat_item(item_name: &str, improved: bool, lang: Language) -> String {
+    match (lang, improved) {
+        (Language::De, true) => format!("Du isst {} und fühlst dich besser.", item_name),
+        (Language::De, false) => format!("Du isst {}.", item_name),
+        (Language::En, true) => format!("You eat {} and feel better.", item_name),
+        (Language::En, false) => format!("You eat {}.", item_name),
+    }
+}
+
+fn message_thanks_again(lang: Language) -> String {
+    match lang {
+        Language::De => "Danke nochmal für deine Hilfe.".to_string(),
+        Language::En => "Thanks again for your help.".to_string(),
+    }
+}
+
+fn message_quest_complete(name: &str, description: &str, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Quest abgeschlossen: {}. {}", name, description),
+        Language::En => format!("Quest complete: {}. {}", name, description),
+    }
+}
+
+fn message_quest_needs(name: &str, description: &str, needs: &str, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Quest: {}\n{}\nBenötigt: {}", name, description, needs),
+        Language::En => format!("Quest: {}\n{}\nNeeds: {}", name, description, needs),
+    }
 }
 
 fn has_tool(inventory: &HashMap<String, i32>, data: &GameData, tool: &str) -> bool {
@@ -2566,6 +3005,7 @@ struct GameState {
     clients: HashMap<String, mpsc::UnboundedSender<ServerMessage>>,
     typing: HashMap<String, i64>,
     visibility: HashMap<String, VisibilityState>,
+    locales: HashMap<String, Language>,
     next_entity_id: u64,
     next_structure_id: u64,
 }
@@ -2584,6 +3024,7 @@ impl GameState {
             clients: HashMap::new(),
             typing: HashMap::new(),
             visibility: HashMap::new(),
+            locales: HashMap::new(),
             next_entity_id: 1,
             next_structure_id: 1,
         }
@@ -3240,6 +3681,9 @@ enum ClientMessage {
     },
     Typing {
         typing: bool,
+    },
+    Locale {
+        language: String,
     },
     ChunkRequest {
         chunks: Vec<ChunkCoord>,

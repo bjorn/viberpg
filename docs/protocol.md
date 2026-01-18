@@ -94,6 +94,15 @@ This document describes the HTTP and WebSocket payloads used by the client and s
 }
 ```
 
+#### locale
+```json
+{
+  "type": "locale",
+  "language": "de"
+}
+```
+- `language` uses a BCP 47 tag (e.g. `en`, `de`, `de-DE`).
+
 #### chunk_request
 ```json
 {
