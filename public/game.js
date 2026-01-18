@@ -1,5 +1,7 @@
 (async () => {
-  const statusEl = document.getElementById('status');
+  const statusTextEl = document.getElementById('status-text');
+  const statusHeartsEl = document.getElementById('status-hearts');
+  const statusCoordsEl = document.getElementById('status-coords');
   const chatLog = document.getElementById('chat-log');
   const chatInput = document.getElementById('chat-input');
   const nameInput = document.getElementById('name-input');
@@ -124,6 +126,7 @@
   let ws = null;
   let wsOpen = false;
 
+  const MAX_HEARTS = 10;
   let tileSize = 32;
   let chunkSize = 32;
   let playerId = null;
@@ -287,11 +290,56 @@
   let localPrediction = null;
   let lastInputDir = { x: 0, y: 0 };
   let localRenderOffset = { x: 0, y: 0 };
+  let lastStatusHp = null;
+  let lastStatusCoords = null;
+
+  function setStatusText(text) {
+    if (!statusTextEl) {
+      return;
+    }
+    if (statusTextEl.textContent !== text) {
+      statusTextEl.textContent = text;
+    }
+  }
+
+  function renderStatusHearts(hp, maxHearts = MAX_HEARTS) {
+    if (!statusHeartsEl) {
+      return;
+    }
+    const safeHp = Math.max(0, Math.min(hp, maxHearts));
+    const label = `${t('hpLabel')} ${safeHp}/${maxHearts}`;
+    if (lastStatusHp === safeHp && statusHeartsEl.childElementCount === maxHearts) {
+      statusHeartsEl.setAttribute('aria-label', label);
+      statusHeartsEl.title = label;
+      return;
+    }
+    while (statusHeartsEl.firstChild) {
+      statusHeartsEl.removeChild(statusHeartsEl.firstChild);
+    }
+    for (let i = 1; i <= maxHearts; i += 1) {
+      const heart = document.createElement('span');
+      heart.className = i <= safeHp ? 'heart' : 'heart empty';
+      heart.textContent = '♥';
+      statusHeartsEl.appendChild(heart);
+    }
+    statusHeartsEl.setAttribute('aria-label', label);
+    statusHeartsEl.title = label;
+    lastStatusHp = safeHp;
+  }
+
+  function setStatusCoords(text) {
+    if (!statusCoordsEl) {
+      return;
+    }
+    if (lastStatusCoords !== text) {
+      statusCoordsEl.textContent = text;
+      lastStatusCoords = text;
+    }
+  }
 
   function applyLocale() {
-    if (statusEl) {
-      statusEl.textContent = t('statusConnecting');
-    }
+    setStatusText(t('statusConnecting'));
+    renderStatusHearts(lastStatusHp ?? 0);
     const inventoryTitle = inventoryPanel?.querySelector('.panel-title');
     if (inventoryTitle) {
       inventoryTitle.textContent = t('panelInventory');
@@ -1822,7 +1870,7 @@
 
     ws.addEventListener('open', () => {
       wsOpen = true;
-      statusEl.textContent = t('statusConnected');
+      setStatusText(t('statusConnected'));
       sendMessage({ type: 'locale', language });
       if (pendingName) {
         sendMessage({ type: 'set_name', name: pendingName });
@@ -1851,7 +1899,9 @@
             renderInventory(msg.inventory_items);
           }
           msg.npcs.forEach((npc) => addNpc(npc));
-          statusEl.textContent = `${t('hpLabel')} ${msg.player.hp}`;
+          setStatusText(t('statusConnected'));
+          renderStatusHearts(msg.player.hp);
+          setStatusCoords(`${msg.player.x.toFixed(1)}, ${msg.player.y.toFixed(1)}`);
           syncPlayers([msg.player], false);
           requestChunksAround();
           break;
@@ -1921,7 +1971,9 @@
 
     ws.addEventListener('close', () => {
       wsOpen = false;
-      statusEl.textContent = t('statusDisconnected');
+      setStatusText(t('statusDisconnected'));
+      renderStatusHearts(0);
+      setStatusCoords('');
       localPrediction = null;
       pendingInputs.length = 0;
       inputSeq = 0;
@@ -2193,7 +2245,8 @@
       const playerEntity = playerEntities.get(playerId);
       if (playerEntity) {
         const hp = playerEntity.hp != null ? playerEntity.hp : playerState?.hp ?? 0;
-        statusEl.textContent = `${t('hpLabel')} ${hp} | ${playerEntity.x.toFixed(1)}, ${playerEntity.y.toFixed(1)}`;
+        renderStatusHearts(hp);
+        setStatusCoords(`${playerEntity.x.toFixed(1)}, ${playerEntity.y.toFixed(1)}`);
       }
       lastStatusUpdate = now;
     }
@@ -2242,6 +2295,8 @@
       connect();
     })
     .catch(() => {
-      statusEl.textContent = t('statusSessionFailed');
+      setStatusText(t('statusSessionFailed'));
+      renderStatusHearts(0);
+      setStatusCoords('');
     });
 })();

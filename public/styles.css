@@ -48,8 +48,37 @@ canvas {
   position: absolute;
   top: 52px;
   left: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 20px;
-  color: var(--text-muted);
+  color: #0b0e14;
+}
+
+#status .status-text {
+  font-size: 18px;
+  color: #0b0e14;
+}
+
+#status .status-hearts {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 3px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+#status .heart {
+  color: #e34d4d;
+}
+
+#status .heart.empty {
+  color: rgba(227, 77, 77, 0.35);
+}
+
+#status .status-coords {
+  font-size: 16px;
+  color: #1b232b;
 }
 
 #ui-top-controls {
@@ -586,6 +615,27 @@ canvas {
   #ui-top-controls {
     top: calc(12px + env(safe-area-inset-top));
     right: calc(12px + env(safe-area-inset-right));
+  }
+
+  #status {
+    top: calc(12px + env(safe-area-inset-top));
+    left: calc(12px + env(safe-area-inset-left));
+    font-size: 18px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  #status .status-text {
+    font-size: 16px;
+  }
+
+  #status .status-hearts {
+    font-size: 16px;
+    gap: 3px;
+  }
+
+  #status .status-coords {
+    display: none;
   }
 
   #fullscreen-toggle {

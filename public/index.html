@@ -10,7 +10,11 @@
 <body>
   <div id="hud">
     <div id="title" class="ui-scale origin-top-left">Mistwood Vale</div>
-    <div id="status" class="ui-scale origin-top-left">Connecting...</div>
+    <div id="status" class="ui-scale origin-top-left">
+      <span id="status-text" class="status-text">Connecting...</span>
+      <span id="status-hearts" class="status-hearts" role="img" aria-label="HP"></span>
+      <span id="status-coords" class="status-coords"></span>
+    </div>
     <div id="ui-top-controls" class="ui-scale origin-top-right">
       <div id="ui-scale-control" class="panel" aria-label="UI scale">
         <button id="ui-scale-down" class="panel-btn ui-scale-btn" type="button" aria-label="Scale UI down" title="Scale UI down">-</button>
