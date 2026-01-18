@@ -36,6 +36,9 @@ const MAX_HP: i32 = 10;
 const PLAYER_REGEN_INTERVAL_MS: i64 = 5_000;
 const TYPING_TIMEOUT_MS: i64 = 2500;
 const CHUNK_KEEP_RADIUS: i32 = 3;
+const ENTITY_VISIBILITY_RADIUS: i32 = 2;
+const EXPECTED_POS_CORRECTION_RANGE: f32 = 1.5;
+const EXPECTED_POS_CORRECTION_WEIGHT: f32 = 0.35;
 const CHUNK_TTL_MS: i64 = 60_000;
 const MAX_NAME_CHARS: usize = 20;
 const PLAYER_COORD_VERSION: i32 = 1;
@@ -161,6 +164,9 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
     {
         let mut state = app_state.state.write().await;
         state.clients.insert(sid.clone(), tx);
+        state
+            .visibility
+            .insert(sid.clone(), VisibilityState::default());
     }
 
     let send_task = tokio::spawn(async move {
@@ -234,6 +240,7 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String) {
         let mut state = app_state.state.write().await;
         state.clients.remove(&sid);
         state.inputs.remove(&sid);
+        state.visibility.remove(&sid);
         if let Some(player) = state.players.remove(&sid) {
             let doc = player.to_doc();
             let store = app_state.store.clone();
@@ -263,6 +270,9 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
             attack,
             gather,
             interact,
+            seq,
+            expected_x,
+            expected_y,
         } => {
             let mut state = app_state.state.write().await;
             let entry = state.inputs.entry(sid.to_string()).or_insert(InputState::default());
@@ -271,6 +281,9 @@ async fn handle_client_message(app_state: &AppState, sid: &str, msg: ClientMessa
             entry.attack = attack;
             entry.gather = gather;
             entry.interact = interact;
+            entry.seq = seq;
+            entry.expected_x = expected_x;
+            entry.expected_y = expected_y;
         }
         ClientMessage::Chat { text } => {
             let trimmed = text.trim();
@@ -724,8 +737,18 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     }
 
     let structures_public: Vec<StructurePublic> = new_tiles.iter().map(StructurePublic::from).collect();
-    broadcast_message_inline(
+    let mut chunks = HashSet::new();
+    for structure in &structures_public {
+        chunks.insert(chunk_coord_for_tile(
+            structure.x,
+            structure.y,
+            app_state.world.chunk_size,
+        ));
+    }
+    send_to_players_in_chunks(
         &state,
+        app_state.world.chunk_size,
+        &chunks,
         ServerMessage::StructureUpdate {
             structures: structures_public,
             state: "added".to_string(),
@@ -794,8 +817,18 @@ async fn handle_demolish_request(app_state: &AppState, sid: &str, x: i32, y: i32
         return;
     }
 
-    broadcast_message_inline(
+    let mut chunks = HashSet::new();
+    for structure in &removed {
+        chunks.insert(chunk_coord_for_tile(
+            structure.x,
+            structure.y,
+            app_state.world.chunk_size,
+        ));
+    }
+    send_to_players_in_chunks(
         &state,
+        app_state.world.chunk_size,
+        &chunks,
         ServerMessage::StructureUpdate {
             structures: removed,
             state: "removed".to_string(),
@@ -822,6 +855,45 @@ fn chunk_coord_for_tile(x: i32, y: i32, chunk_size: i32) -> ChunkCoord {
     ChunkCoord {
         x: (x as f32 / size).floor() as i32,
         y: (y as f32 / size).floor() as i32,
+    }
+}
+
+fn chunk_in_radius(center: ChunkCoord, coord: ChunkCoord, radius: i32) -> bool {
+    (coord.x - center.x).abs() <= radius && (coord.y - center.y).abs() <= radius
+}
+
+fn send_to_players_in_chunk(
+    state: &GameState,
+    chunk_size: i32,
+    coord: ChunkCoord,
+    msg: ServerMessage,
+) {
+    for (player_id, sender) in state.clients.iter() {
+        if let Some(player) = state.players.get(player_id) {
+            let center = chunk_coord_for_position(player.x, player.y, chunk_size);
+            if chunk_in_radius(center, coord, ENTITY_VISIBILITY_RADIUS) {
+                let _ = sender.send(msg.clone());
+            }
+        }
+    }
+}
+
+fn send_to_players_in_chunks(
+    state: &GameState,
+    chunk_size: i32,
+    chunks: &HashSet<ChunkCoord>,
+    msg: ServerMessage,
+) {
+    for (player_id, sender) in state.clients.iter() {
+        if let Some(player) = state.players.get(player_id) {
+            let center = chunk_coord_for_position(player.x, player.y, chunk_size);
+            if chunks
+                .iter()
+                .any(|coord| chunk_in_radius(center, *coord, ENTITY_VISIBILITY_RADIUS))
+            {
+                let _ = sender.send(msg.clone());
+            }
+        }
     }
 }
 
@@ -937,7 +1009,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
             &app_state.data,
         );
         update_projectiles(&mut state, now_ms, dt, &app_state.data);
-        update_resources(&mut state, now_ms, &app_state.data);
+        update_resources(&mut state, now_ms, &app_state.data, app_state.world.chunk_size);
         prune_chunks(&mut state, now_ms, app_state.world.chunk_size);
 
         let mut expired_typing = Vec::new();
@@ -957,21 +1029,126 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
             );
         }
 
-        let state_msg = ServerMessage::State {
-            players: state.players.values().map(PlayerPublic::from).collect(),
-            monsters: state
+        let chunk_size = app_state.world.chunk_size;
+        let mut players_by_chunk: HashMap<ChunkCoord, Vec<PlayerPublic>> = HashMap::new();
+        let mut monsters_by_chunk: HashMap<ChunkCoord, Vec<MonsterPublic>> = HashMap::new();
+        let mut projectiles_by_chunk: HashMap<ChunkCoord, Vec<ProjectilePublic>> = HashMap::new();
+
+        for player in state.players.values() {
+            let coord = chunk_coord_for_position(player.x, player.y, chunk_size);
+            players_by_chunk
+                .entry(coord)
+                .or_default()
+                .push(PlayerPublic::from(player));
+        }
+        for monster in state.monsters.values() {
+            let coord = chunk_coord_for_position(monster.x, monster.y, chunk_size);
+            monsters_by_chunk
+                .entry(coord)
+                .or_default()
+                .push(MonsterPublic::from(monster));
+        }
+        for projectile in state.projectiles.values() {
+            let coord = chunk_coord_for_position(projectile.x, projectile.y, chunk_size);
+            projectiles_by_chunk
+                .entry(coord)
+                .or_default()
+                .push(ProjectilePublic::from(projectile));
+        }
+
+        let client_entries: Vec<(String, mpsc::UnboundedSender<ServerMessage>)> = state
+            .clients
+            .iter()
+            .map(|(id, sender)| (id.clone(), sender.clone()))
+            .collect();
+
+        for (client_id, sender) in client_entries {
+            let player = match state.players.get(&client_id) {
+                Some(player) => player,
+                None => continue,
+            };
+            let center = chunk_coord_for_position(player.x, player.y, chunk_size);
+            let mut visible_players = Vec::new();
+            let mut visible_monsters = Vec::new();
+            let mut visible_projectiles = Vec::new();
+            let mut visible_player_ids = HashSet::new();
+            let mut visible_monster_ids = HashSet::new();
+            let mut visible_projectile_ids = HashSet::new();
+
+            for dx in -ENTITY_VISIBILITY_RADIUS..=ENTITY_VISIBILITY_RADIUS {
+                for dy in -ENTITY_VISIBILITY_RADIUS..=ENTITY_VISIBILITY_RADIUS {
+                    let coord = ChunkCoord {
+                        x: center.x + dx,
+                        y: center.y + dy,
+                    };
+                    if let Some(players) = players_by_chunk.get(&coord) {
+                        for player_public in players {
+                            let mut entry = player_public.clone();
+                            if entry.id == client_id {
+                                entry.last_input_seq = Some(player.last_input_seq);
+                            }
+                            if visible_player_ids.insert(entry.id.clone()) {
+                                visible_players.push(entry);
+                            }
+                        }
+                    }
+                    if let Some(monsters) = monsters_by_chunk.get(&coord) {
+                        for monster_public in monsters {
+                            if visible_monster_ids.insert(monster_public.id) {
+                                visible_monsters.push(monster_public.clone());
+                            }
+                        }
+                    }
+                    if let Some(projectiles) = projectiles_by_chunk.get(&coord) {
+                        for projectile_public in projectiles {
+                            if visible_projectile_ids.insert(projectile_public.id) {
+                                visible_projectiles.push(projectile_public.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let visibility = state
+                .visibility
+                .entry(client_id.clone())
+                .or_insert_with(VisibilityState::default);
+            let removed_players: Vec<String> = visibility
+                .players
+                .difference(&visible_player_ids)
+                .cloned()
+                .collect();
+            let removed_monsters: Vec<u64> = visibility
                 .monsters
-                .values()
-                .map(MonsterPublic::from)
-                .collect(),
-            projectiles: state
+                .difference(&visible_monster_ids)
+                .cloned()
+                .collect();
+            let removed_projectiles: Vec<u64> = visibility
                 .projectiles
-                .values()
-                .map(ProjectilePublic::from)
-                .collect(),
-        };
-        for sender in state.clients.values() {
-            let _ = sender.send(state_msg.clone());
+                .difference(&visible_projectile_ids)
+                .cloned()
+                .collect();
+
+            if !removed_players.is_empty()
+                || !removed_monsters.is_empty()
+                || !removed_projectiles.is_empty()
+            {
+                let _ = sender.send(ServerMessage::EntitiesRemove {
+                    players: removed_players,
+                    monsters: removed_monsters,
+                    projectiles: removed_projectiles,
+                });
+            }
+
+            visibility.players = visible_player_ids;
+            visibility.monsters = visible_monster_ids;
+            visibility.projectiles = visible_projectile_ids;
+
+            let _ = sender.send(ServerMessage::EntitiesUpdate {
+                players: visible_players,
+                monsters: visible_monsters,
+                projectiles: visible_projectiles,
+            });
         }
 
         for player in state.players.values_mut() {
@@ -996,12 +1173,31 @@ fn update_player_movement(
     noise: &WorldNoise,
     dt: f32,
 ) {
+    player.last_input_seq = input.seq;
     let mut dx = input.dir_x;
     let mut dy = input.dir_y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len > 0.01 {
-        dx /= len;
-        dy /= len;
+    let input_len = (dx * dx + dy * dy).sqrt();
+    if input_len > 0.01 {
+        dx /= input_len;
+        dy /= input_len;
+        if let (Some(expected_x), Some(expected_y)) = (input.expected_x, input.expected_y) {
+            let corr_x = expected_x - player.x;
+            let corr_y = expected_y - player.y;
+            let corr_dist = (corr_x * corr_x + corr_y * corr_y).sqrt();
+            if corr_dist > 0.01 && corr_dist <= EXPECTED_POS_CORRECTION_RANGE {
+                let corr_weight =
+                    (corr_dist / EXPECTED_POS_CORRECTION_RANGE) * EXPECTED_POS_CORRECTION_WEIGHT;
+                dx += (corr_x / corr_dist) * corr_weight;
+                dy += (corr_y / corr_dist) * corr_weight;
+                let combined_len = (dx * dx + dy * dy).sqrt();
+                if combined_len > 0.01 {
+                    dx /= combined_len;
+                    dy /= combined_len;
+                }
+            }
+        }
+    }
+    if (dx * dx + dy * dy).sqrt() > 0.01 {
         player.face_x = dx;
         player.face_y = dy;
     }
@@ -1081,8 +1277,17 @@ fn handle_player_actions(
             send_system_message(state, &player.id, text);
         }
         if let Some((resource, state_label)) = resource_update {
-            broadcast_message_inline(
+            let chunk = chunk_coord_for_tile(resource.x, resource.y, world.chunk_size);
+            if let Some(sender) = state.clients.get(&player.id) {
+                let _ = sender.send(ServerMessage::ResourceUpdate {
+                    resource: resource.clone(),
+                    state: state_label.clone(),
+                });
+            }
+            send_to_players_in_chunk(
                 state,
+                world.chunk_size,
+                chunk,
                 ServerMessage::ResourceUpdate {
                     resource,
                     state: state_label,
@@ -1255,7 +1460,7 @@ fn update_projectiles(state: &mut GameState, _now_ms: i64, dt: f32, data: &GameD
     }
 }
 
-fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData) {
+fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData, chunk_size: i32) {
     let mut respawned = Vec::new();
     let mut grown = Vec::new();
     for resources in state.resources.values_mut() {
@@ -1320,8 +1525,11 @@ fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData) {
 
     if !respawned.is_empty() {
         for res in respawned {
-            broadcast_message_inline(
+            let chunk = chunk_coord_for_tile(res.x, res.y, chunk_size);
+            send_to_players_in_chunk(
                 state,
+                chunk_size,
+                chunk,
                 ServerMessage::ResourceUpdate {
                     resource: res,
                     state: "spawned".to_string(),
@@ -1332,8 +1540,11 @@ fn update_resources(state: &mut GameState, now_ms: i64, data: &GameData) {
 
     if !grown.is_empty() {
         for res in grown {
-            broadcast_message_inline(
+            let chunk = chunk_coord_for_tile(res.x, res.y, chunk_size);
+            send_to_players_in_chunk(
                 state,
+                chunk_size,
+                chunk,
                 ServerMessage::ResourceUpdate {
                     resource: res,
                     state: "grown".to_string(),
@@ -2354,6 +2565,7 @@ struct GameState {
     chunk_last_access: HashMap<ChunkCoord, i64>,
     clients: HashMap<String, mpsc::UnboundedSender<ServerMessage>>,
     typing: HashMap<String, i64>,
+    visibility: HashMap<String, VisibilityState>,
     next_entity_id: u64,
     next_structure_id: u64,
 }
@@ -2371,6 +2583,7 @@ impl GameState {
             chunk_last_access: HashMap::new(),
             clients: HashMap::new(),
             typing: HashMap::new(),
+            visibility: HashMap::new(),
             next_entity_id: 1,
             next_structure_id: 1,
         }
@@ -2387,6 +2600,13 @@ impl GameState {
         self.next_structure_id += 1;
         id
     }
+}
+
+#[derive(Default, Clone)]
+struct VisibilityState {
+    players: HashSet<String>,
+    monsters: HashSet<u64>,
+    projectiles: HashSet<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -2406,6 +2626,7 @@ struct Player {
     last_regen_ms: i64,
     last_saved_ms: i64,
     last_inventory_hash: u64,
+    last_input_seq: u32,
 }
 
 impl Player {
@@ -2428,6 +2649,7 @@ impl Player {
             last_regen_ms: now_millis(),
             last_saved_ms: now_millis(),
             last_inventory_hash: inventory_hash,
+            last_input_seq: 0,
         }
     }
 
@@ -2440,6 +2662,7 @@ impl Player {
         self.inventory = doc.inventory.clone();
         self.completed_quests = doc.completed_quests.iter().cloned().collect();
         self.last_inventory_hash = inventory_hash(&self.inventory);
+        self.last_input_seq = 0;
     }
 
     fn to_doc(&self) -> PlayerDoc {
@@ -2482,6 +2705,9 @@ struct InputState {
     attack: bool,
     gather: bool,
     interact: bool,
+    seq: u32,
+    expected_x: Option<f32>,
+    expected_y: Option<f32>,
 }
 
 impl Default for InputState {
@@ -2492,6 +2718,9 @@ impl Default for InputState {
             attack: false,
             gather: false,
             interact: false,
+            seq: 0,
+            expected_x: None,
+            expected_y: None,
         }
     }
 }
@@ -2772,6 +3001,8 @@ struct PlayerPublic {
     x: f32,
     y: f32,
     hp: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_input_seq: Option<u32>,
 }
 
 impl From<&Player> for PlayerPublic {
@@ -2782,9 +3013,11 @@ impl From<&Player> for PlayerPublic {
             x: player.x,
             y: player.y,
             hp: player.hp,
+            last_input_seq: None,
         }
     }
 }
+
 
 #[derive(Clone, Serialize)]
 struct PlayerSelf {
@@ -2936,10 +3169,15 @@ enum ServerMessage {
         resources: Vec<ResourceNodePublic>,
         structures: Vec<StructurePublic>,
     },
-    State {
+    EntitiesUpdate {
         players: Vec<PlayerPublic>,
         monsters: Vec<MonsterPublic>,
         projectiles: Vec<ProjectilePublic>,
+    },
+    EntitiesRemove {
+        players: Vec<String>,
+        monsters: Vec<u64>,
+        projectiles: Vec<u64>,
     },
     ResourceUpdate {
         resource: ResourceNodePublic,
@@ -2978,6 +3216,9 @@ enum ClientMessage {
         attack: bool,
         gather: bool,
         interact: bool,
+        seq: u32,
+        expected_x: Option<f32>,
+        expected_y: Option<f32>,
     },
     Chat {
         text: String,

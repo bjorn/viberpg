@@ -67,6 +67,7 @@
     'assets/tiles/dirt.svg',
     'assets/tiles/grass-flowers.svg',
   ];
+  const TILE_WATER = 1;
   const entityAssetUrls = [
     'assets/entities/tree-1.svg',
     'assets/entities/tree-2.svg',
@@ -110,6 +111,7 @@
   const chunkTiles = new Map();
   const resourceSprites = new Map();
   const structureSprites = new Map();
+  const structureTiles = new Map();
   const playerEntities = new Map();
   const monsterEntities = new Map();
   const projectileSprites = new Map();
@@ -160,6 +162,9 @@
     pointerId: null,
   };
   const INTERP_MS = 120;
+  const INPUT_SEND_INTERVAL_MS = 90;
+  const PLAYER_SPEED = 3.4;
+  const CORRECTION_DISTANCE = 2;
   const MAX_CHAT_LINES = 60;
   const TYPING_IDLE_MS = 1800;
   const MAX_NAME_CHARS = 20;
@@ -169,6 +174,7 @@
   let typingTimer = null;
   let lastTypingSent = 0;
   let lastStatusUpdate = 0;
+  let lastChunkRequest = 0;
   let joystickPointerId = null;
   let joystickCenter = { x: 0, y: 0 };
   let joystickMaxRadius = 0;
@@ -181,6 +187,12 @@
   let buildPreviewKind = null;
   let lastPointerTile = null;
   let uiScale = 1;
+  let inputSeq = 0;
+  let lastAckSeq = 0;
+  const pendingInputs = [];
+  let localPrediction = null;
+  let lastInputDir = { x: 0, y: 0 };
+  let localRenderOffset = { x: 0, y: 0 };
 
   function worldToPixels(x, y) {
     return {
@@ -748,6 +760,10 @@
     return `${x},${y}`;
   }
 
+  function tileKey(x, y) {
+    return `${x},${y}`;
+  }
+
   function requestChunksAround() {
     if (!wsOpen) return;
     const playerEntity = playerEntities.get(playerId);
@@ -816,11 +832,45 @@
           width: chunkSize * tileSize,
           height: chunkSize * tileSize,
         },
+        tiles: chunk.tiles,
       });
+    } else {
+      existing.tiles = chunk.tiles;
     }
     loadedChunks.add(key);
     chunk.resources.forEach((res) => upsertResource(res));
     syncStructures(chunk.structures);
+  }
+
+  function getTileIdAt(tileX, tileY) {
+    const cx = Math.floor(tileX / chunkSize);
+    const cy = Math.floor(tileY / chunkSize);
+    const key = chunkKey(cx, cy);
+    const chunk = chunkTiles.get(key);
+    if (!chunk || !chunk.tiles) return null;
+    const localX = tileX - cx * chunkSize;
+    const localY = tileY - cy * chunkSize;
+    if (localX < 0 || localY < 0 || localX >= chunkSize || localY >= chunkSize) {
+      return null;
+    }
+    return chunk.tiles[localY * chunkSize + localX];
+  }
+
+  function canWalkLocal(x, y) {
+    const tileX = Math.floor(x);
+    const tileY = Math.floor(y);
+    const structureKind = structureTiles.get(tileKey(tileX, tileY));
+    if (structureKind) {
+      if (structureKind.startsWith('bridge_')) {
+        return true;
+      }
+      if (blockingStructureKinds.has(structureKind)) {
+        return false;
+      }
+    }
+    const tileId = getTileIdAt(tileX, tileY);
+    if (tileId == null) return true;
+    return tileId !== TILE_WATER;
   }
 
   function upsertResource(resource) {
@@ -881,6 +931,14 @@
     'house_stone_block',
     'house_stone_top',
   ]);
+  const blockingStructureKinds = new Set([
+    'hut_wood',
+    'hut_wood_root',
+    'hut_wood_block',
+    'house_stone',
+    'house_stone_root',
+    'house_stone_block',
+  ]);
   const structureFootprints = new Map([
     ['hut_wood_root', { width: 2, height: 2 }],
     ['house_stone_root', { width: 3, height: 3 }],
@@ -894,8 +952,17 @@
     return `${structure.id}:${structure.x}:${structure.y}`;
   }
 
+  function recordStructureTile(structure) {
+    structureTiles.set(tileKey(structure.x, structure.y), structure.kind);
+  }
+
+  function removeStructureTile(structure) {
+    structureTiles.delete(tileKey(structure.x, structure.y));
+  }
+
   function upsertStructure(structure) {
     const key = structureKey(structure);
+    recordStructureTile(structure);
     if (renderlessStructureKinds.has(structure.kind)) {
       return;
     }
@@ -959,6 +1026,7 @@
 
   function removeStructure(structure) {
     const key = structureKey(structure);
+    removeStructureTile(structure);
     if (renderlessStructureKinds.has(structure.kind)) {
       return;
     }
@@ -976,7 +1044,7 @@
     structures.forEach((structure) => upsertStructure(structure));
   }
 
-  function syncPlayers(players) {
+  function syncPlayers(players, clearMissing = true) {
     const now = performance.now();
     const seen = new Set();
     players.forEach((player) => {
@@ -993,27 +1061,38 @@
           isAlt,
         });
         playerEntities.set(player.id, entity);
-      } else {
+      }
+      if (player.id === playerId) {
+        playerState = player;
+        syncLocalName(player.name);
+        if (!localPrediction) {
+          localPrediction = { x: player.x, y: player.y };
+        }
+        if (player.last_input_seq != null) {
+          reconcileLocalPlayer(entity, player, now);
+        } else {
+          localPrediction.x = player.x;
+          localPrediction.y = player.y;
+        }
+      } else if (entity) {
         updateEntityTarget(entity, player.x, player.y, now);
       }
       ensurePlayerLabel(entity, player.name);
       entity.hp = player.hp;
-      if (player.id === playerId) {
-        playerState = player;
-        syncLocalName(player.name);
-      }
     });
 
-    for (const [id, entity] of playerEntities.entries()) {
-      if (!seen.has(id)) {
-        removeEntity(entity);
-        playerEntities.delete(id);
-        removeTypingIndicator(id);
+    if (clearMissing) {
+      for (const [id, entity] of playerEntities.entries()) {
+        if (!seen.has(id)) {
+          removeEntity(entity);
+          playerEntities.delete(id);
+          removeTypingIndicator(id);
+        }
       }
     }
   }
 
-  function syncMonsters(monsters) {
+  function syncMonsters(monsters, clearMissing = true) {
     const now = performance.now();
     const seen = new Set();
     monsters.forEach((monster) => {
@@ -1031,15 +1110,17 @@
       }
     });
 
-    for (const [id, entity] of monsterEntities.entries()) {
-      if (!seen.has(id)) {
-        removeEntity(entity);
-        monsterEntities.delete(id);
+    if (clearMissing) {
+      for (const [id, entity] of monsterEntities.entries()) {
+        if (!seen.has(id)) {
+          removeEntity(entity);
+          monsterEntities.delete(id);
+        }
       }
     }
   }
 
-  function syncProjectiles(projectiles) {
+  function syncProjectiles(projectiles, clearMissing = true) {
     const seen = new Set();
     projectiles.forEach((proj) => {
       seen.add(proj.id);
@@ -1054,15 +1135,51 @@
       sprite.y = proj.y * tileSize;
     });
 
-    for (const [id, sprite] of projectileSprites.entries()) {
-      if (!seen.has(id)) {
-        if (sprite.parent) {
-          sprite.parent.removeChild(sprite);
+    if (clearMissing) {
+      for (const [id, sprite] of projectileSprites.entries()) {
+        if (!seen.has(id)) {
+          if (sprite.parent) {
+            sprite.parent.removeChild(sprite);
+          }
+          sprite.destroy();
+          projectileSprites.delete(id);
         }
-        sprite.destroy();
-        projectileSprites.delete(id);
       }
     }
+  }
+
+  function removePlayers(ids) {
+    if (!ids) return;
+    ids.forEach((id) => {
+      const entity = playerEntities.get(id);
+      if (!entity) return;
+      removeEntity(entity);
+      playerEntities.delete(id);
+      removeTypingIndicator(id);
+    });
+  }
+
+  function removeMonsters(ids) {
+    if (!ids) return;
+    ids.forEach((id) => {
+      const entity = monsterEntities.get(id);
+      if (!entity) return;
+      removeEntity(entity);
+      monsterEntities.delete(id);
+    });
+  }
+
+  function removeProjectiles(ids) {
+    if (!ids) return;
+    ids.forEach((id) => {
+      const sprite = projectileSprites.get(id);
+      if (!sprite) return;
+      if (sprite.parent) {
+        sprite.parent.removeChild(sprite);
+      }
+      sprite.destroy();
+      projectileSprites.delete(id);
+    });
   }
 
   function addNpc(npc) {
@@ -1262,6 +1379,73 @@
     entity.startTime = now;
   }
 
+  function normalizeDirection(dirX, dirY) {
+    const length = Math.hypot(dirX, dirY);
+    if (length < 0.01) {
+      return { x: 0, y: 0, length: 0 };
+    }
+    return { x: dirX / length, y: dirY / length, length };
+  }
+
+  function applyPredictionStep(position, dirX, dirY, dt) {
+    const norm = normalizeDirection(dirX, dirY);
+    if (!norm.length) return;
+    const nextX = position.x + norm.x * PLAYER_SPEED * dt;
+    const nextY = position.y + norm.y * PLAYER_SPEED * dt;
+    if (canWalkLocal(nextX, position.y)) {
+      position.x = nextX;
+    }
+    if (canWalkLocal(position.x, nextY)) {
+      position.y = nextY;
+    }
+  }
+
+  function reconcileLocalPlayer(entity, player, now) {
+    if (!localPrediction) {
+      localPrediction = { x: player.x, y: player.y };
+      localRenderOffset = { x: 0, y: 0 };
+    }
+    const renderX = localPrediction.x + localRenderOffset.x;
+    const renderY = localPrediction.y + localRenderOffset.y;
+    if (player.last_input_seq == null) {
+      localPrediction.x = player.x;
+      localPrediction.y = player.y;
+      localRenderOffset.x = renderX - localPrediction.x;
+      localRenderOffset.y = renderY - localPrediction.y;
+      return;
+    }
+    const ack = player.last_input_seq;
+    if (ack < lastAckSeq) {
+      return;
+    }
+    lastAckSeq = ack;
+    while (pendingInputs.length && pendingInputs[0].seq <= ack) {
+      pendingInputs.shift();
+    }
+    const serverPrediction = { x: player.x, y: player.y };
+    const dt = INPUT_SEND_INTERVAL_MS / 1000;
+    for (const input of pendingInputs) {
+      applyPredictionStep(serverPrediction, input.dirX, input.dirY, dt);
+    }
+    const dx = serverPrediction.x - localPrediction.x;
+    const dy = serverPrediction.y - localPrediction.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > CORRECTION_DISTANCE) {
+      localPrediction.x = serverPrediction.x;
+      localPrediction.y = serverPrediction.y;
+      localRenderOffset.x = renderX - localPrediction.x;
+      localRenderOffset.y = renderY - localPrediction.y;
+    }
+  }
+
+  function updateLocalPrediction(dt) {
+    if (!wsOpen || !playerId || !localPrediction) return;
+    applyPredictionStep(localPrediction, lastInputDir.x, lastInputDir.y, dt);
+    const decay = Math.min(1, dt * 10);
+    localRenderOffset.x = lerp(localRenderOffset.x, 0, decay);
+    localRenderOffset.y = lerp(localRenderOffset.y, 0, decay);
+  }
+
   function removeEntity(entity) {
     if (entity.sprite.parent) {
       entity.sprite.parent.removeChild(entity.sprite);
@@ -1315,8 +1499,11 @@
     }
   }
 
-  function applyWalkAnimation(entity, now, baseY) {
-    const moveDistance = Math.hypot(entity.targetX - entity.startX, entity.targetY - entity.startY);
+  function applyWalkAnimation(entity, now, baseY, moveDistanceOverride = null) {
+    const moveDistance =
+      moveDistanceOverride == null
+        ? Math.hypot(entity.targetX - entity.startX, entity.targetY - entity.startY)
+        : moveDistanceOverride;
     const sprite = entity.sprite;
     const facingSign = entity.facing === 'left' ? -1 : 1;
     if (moveDistance > 0.01) {
@@ -1381,8 +1568,36 @@
 
   function updateEntities(now) {
     const alpha = (startTime) => Math.min(1, (now - startTime) / INTERP_MS);
+    const localEntity = playerId ? playerEntities.get(playerId) : null;
 
     for (const entity of playerEntities.values()) {
+      const isLocal = localEntity && entity === localEntity && localPrediction;
+      if (isLocal) {
+        const renderX = localPrediction.x + localRenderOffset.x;
+        const renderY = localPrediction.y + localRenderOffset.y;
+        const prevX = entity.x;
+        const prevY = entity.y;
+        entity.x = renderX;
+        entity.y = renderY;
+        const dx = entity.x - prevX;
+        const dy = entity.y - prevY;
+        if (dx !== 0 || dy !== 0) {
+          entity.facing = getFacingFromDelta(dx, dy, entity.facing);
+        }
+        applyPlayerFacing(entity);
+        const basePos = worldToPixels(entity.x, entity.y);
+        entity.sprite.x = basePos.x;
+        const baseY = basePos.y;
+        const moveDistance = Math.hypot(dx, dy);
+        applyWalkAnimation(entity, now, baseY, moveDistance);
+        entity.sprite.zIndex = baseY;
+        if (entity.label) {
+          entity.label.x = basePos.x;
+          entity.label.y = baseY + tileSize * 0.2;
+          entity.label.zIndex = baseY + tileSize * 0.2;
+        }
+        continue;
+      }
       const t = alpha(entity.startTime);
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
@@ -1431,6 +1646,12 @@
         case 'welcome': {
           playerId = msg.player.id;
           playerState = msg.player;
+          localPrediction = { x: msg.player.x, y: msg.player.y };
+          pendingInputs.length = 0;
+          inputSeq = 0;
+          lastAckSeq = 0;
+          lastInputDir = { x: 0, y: 0 };
+          localRenderOffset = { x: 0, y: 0 };
           tileSize = msg.world.tile_size;
           chunkSize = msg.world.chunk_size;
           worldSeed = msg.world.seed;
@@ -1442,7 +1663,7 @@
           }
           msg.npcs.forEach((npc) => addNpc(npc));
           statusEl.textContent = `HP ${msg.player.hp}`;
-          syncPlayers([msg.player]);
+          syncPlayers([msg.player], false);
           requestChunksAround();
           break;
         }
@@ -1451,10 +1672,21 @@
           break;
         }
         case 'state': {
-          syncPlayers(msg.players);
-          syncMonsters(msg.monsters);
-          syncProjectiles(msg.projectiles);
-          requestChunksAround();
+          syncPlayers(msg.players, true);
+          syncMonsters(msg.monsters, true);
+          syncProjectiles(msg.projectiles, true);
+          break;
+        }
+        case 'entities_update': {
+          syncPlayers(msg.players || [], false);
+          syncMonsters(msg.monsters || [], false);
+          syncProjectiles(msg.projectiles || [], false);
+          break;
+        }
+        case 'entities_remove': {
+          removePlayers(msg.players || []);
+          removeMonsters(msg.monsters || []);
+          removeProjectiles(msg.projectiles || []);
           break;
         }
         case 'resource_update': {
@@ -1501,6 +1733,12 @@
     ws.addEventListener('close', () => {
       wsOpen = false;
       statusEl.textContent = 'Disconnected. Reconnecting...';
+      localPrediction = null;
+      pendingInputs.length = 0;
+      inputSeq = 0;
+      lastAckSeq = 0;
+      lastInputDir = { x: 0, y: 0 };
+      localRenderOffset = { x: 0, y: 0 };
       setTimeout(connect, 1000);
     });
   }
@@ -1731,6 +1969,14 @@
     const attack = !inputLocked && (keys.has('Space') || touchState.attack || touchState.attackPulse);
     const gather = !inputLocked && (keys.has('KeyF') || touchState.gather || touchState.gatherPulse);
     const interact = !inputLocked && (keys.has('KeyE') || touchState.interact || touchState.interactPulse);
+    const seq = inputSeq + 1;
+    inputSeq = seq;
+    lastInputDir = { x: dirX, y: dirY };
+    pendingInputs.push({ seq, dirX, dirY });
+    if (pendingInputs.length > 60) {
+      pendingInputs.shift();
+    }
+    const expected = localPrediction || (playerId ? playerEntities.get(playerId) : null);
     sendMessage({
       type: 'input',
       dir_x: dirX,
@@ -1738,14 +1984,18 @@
       attack,
       gather,
       interact,
+      seq,
+      expected_x: expected ? expected.x : null,
+      expected_y: expected ? expected.y : null,
     });
     touchState.attackPulse = false;
     touchState.gatherPulse = false;
     touchState.interactPulse = false;
-  }, 90);
+  }, INPUT_SEND_INTERVAL_MS);
 
-  app.ticker.add(() => {
+  app.ticker.add((ticker) => {
     const now = performance.now();
+    updateLocalPrediction(ticker.deltaMS / 1000);
     updateEntities(now);
     updateActionAvailability();
     updateTypingIndicators(now);
@@ -1757,6 +2007,10 @@
         statusEl.textContent = `HP ${hp} | ${playerEntity.x.toFixed(1)}, ${playerEntity.y.toFixed(1)}`;
       }
       lastStatusUpdate = now;
+    }
+    if (now - lastChunkRequest > 500) {
+      requestChunksAround();
+      lastChunkRequest = now;
     }
   });
 

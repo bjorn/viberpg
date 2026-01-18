@@ -30,10 +30,15 @@ This document describes the HTTP and WebSocket payloads used by the client and s
   "dir_y": 0.0,
   "attack": false,
   "gather": false,
-  "interact": false
+  "interact": false,
+  "seq": 1,
+  "expected_x": 12.4,
+  "expected_y": 7.9
 }
 ```
 - `dir_x`/`dir_y` are clamped to `[-1.0, 1.0]` server-side.
+- `seq` is a monotonically increasing sequence number used for input reconciliation.
+- `expected_x`/`expected_y` are the client's predicted position for gentle server steering.
 
 #### chat
 ```json
@@ -153,10 +158,10 @@ This document describes the HTTP and WebSocket payloads used by the client and s
 }
 ```
 
-#### state
+#### entities_update
 ```json
 {
-  "type": "state",
+  "type": "entities_update",
   "players": [
     { "id": "<string>", "name": "<string>", "x": 0.0, "y": 0.0, "hp": 10 }
   ],
@@ -168,6 +173,18 @@ This document describes the HTTP and WebSocket payloads used by the client and s
   ]
 }
 ```
+- The local player entry may include `last_input_seq` when available.
+- Only entities inside the client's chunk-based visibility radius are included.
+
+#### entities_remove
+```json
+{
+  "type": "entities_remove",
+  "players": ["<string>"],
+  "monsters": [1],
+  "projectiles": [2]
+}
+```
 
 #### resource_update
 ```json
@@ -177,7 +194,7 @@ This document describes the HTTP and WebSocket payloads used by the client and s
   "state": "removed"
 }
 ```
-- `state` is either `"removed"` or `"spawned"`.
+- `state` is `"removed"`, `"spawned"`, or `"grown"`.
 
 #### structure_update
 ```json
