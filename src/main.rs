@@ -629,6 +629,10 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
 }
 
 async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: i32, y: i32) {
+    if kind.as_str() == "community" {
+        handle_community_build_request(app_state, sid, x, y).await;
+        return;
+    }
     if matches!(kind.as_str(), "castle" | "silo" | "church") {
         handle_group_build_request(app_state, sid, &kind, x, y).await;
         return;
@@ -976,6 +980,7 @@ async fn handle_demolish_request(app_state: &AppState, sid: &str, x: i32, y: i32
                     kind: structure.kind.clone(),
                     x: structure.x,
                     y: structure.y,
+                    owner_id: structure.owner_id.clone(),
                 });
                 false
             } else {
@@ -1152,7 +1157,12 @@ async fn handle_community_leave(app_state: &AppState, sid: &str) {
             let _ = store
                 .delete_structures_by_owner_and_kinds(
                     &community_id,
-                    &["community_fence", "community_float", "community_well"],
+                    &[
+                        "community_fence",
+                        "community_float",
+                        "community_gate",
+                        "community_well",
+                    ],
                 )
                 .await;
             let _ = store.delete_storages_by_community(&community_id).await;
@@ -1411,129 +1421,6 @@ fn handle_community_interaction(
             );
             return true;
         }
-
-        if community_area_overlaps(state, area) {
-            send_system_message(
-                state,
-                &player.id,
-                message_community_area_overlap(lang).to_string(),
-            );
-            return true;
-        }
-        if !community_area_is_clear(state, area) {
-            send_system_message(
-                state,
-                &player.id,
-                message_community_area_blocked(lang).to_string(),
-            );
-            return true;
-        }
-        let cost = [
-            ItemStack {
-                id: "wood".to_string(),
-                count: COMMUNITY_CREATE_WOOD,
-            },
-            ItemStack {
-                id: "stone".to_string(),
-                count: COMMUNITY_CREATE_STONE,
-            },
-        ];
-        if !has_items(&player.inventory, &cost) {
-            send_system_message(state, &player.id, message_not_enough_materials(lang).to_string());
-            return true;
-        }
-        if !remove_items(&mut player.inventory, &cost) {
-            send_system_message(state, &player.id, message_not_enough_materials(lang).to_string());
-            return true;
-        }
-        player.last_inventory_hash = inventory_hash(&player.inventory);
-
-        let community_id = Uuid::new_v4().to_string();
-        let mut members = HashSet::new();
-        members.insert(player.id.clone());
-        let community = Community {
-            id: community_id.clone(),
-            members,
-            areas: vec![area],
-        };
-        insert_community_area_tiles(state, &community_id, area);
-        state.communities.insert(community_id.clone(), community);
-        player.community_id = Some(community_id.clone());
-
-        let mut added_structures = Vec::new();
-        let well_tile = TileCoord {
-            x: player_tile.x,
-            y: player_tile.y,
-        };
-        let well_id = state.next_structure_id();
-        let well = StructureTile {
-            id: well_id,
-            kind: "community_well".to_string(),
-            x: well_tile.x,
-            y: well_tile.y,
-            owner_id: community_id.clone(),
-        };
-        state
-            .structure_tiles
-            .insert(TileCoord { x: well_tile.x, y: well_tile.y }, well.clone());
-        added_structures.push(well);
-
-        let mut fence_structures = rebuild_community_fences(state, app_state, &community_id);
-        added_structures.append(&mut fence_structures);
-
-        let items = build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
-        if let Some(sender) = state.clients.get(&player.id) {
-            let _ = sender.send(ServerMessage::Inventory { items });
-        }
-
-        let mut chunks = HashSet::new();
-        for structure in &added_structures {
-            chunks.insert(chunk_coord_for_tile(
-                structure.x,
-                structure.y,
-                app_state.world.chunk_size,
-            ));
-        }
-        let public_structures: Vec<StructurePublic> =
-            added_structures.iter().map(StructurePublic::from).collect();
-        send_to_players_in_chunks(
-            state,
-            app_state.world.chunk_size,
-            &chunks,
-            ServerMessage::StructureUpdate {
-                structures: public_structures.clone(),
-                state: "added".to_string(),
-            },
-        );
-        send_system_message(
-            state,
-            &player.id,
-            message_community_created(lang).to_string(),
-        );
-
-        let store = app_state.store.clone();
-        let community_doc = CommunityDoc {
-            id: community_id.clone(),
-            members: vec![player.id.clone()],
-            areas: vec![area],
-        };
-        let player_doc = player.to_doc();
-        let docs: Vec<StructureDoc> = added_structures
-            .iter()
-            .map(|tile| StructureDoc {
-                id: tile.id as i64,
-                kind: tile.kind.clone(),
-                x: tile.x,
-                y: tile.y,
-                owner_id: tile.owner_id.clone(),
-            })
-            .collect();
-        tokio::spawn(async move {
-            let _ = store.save_player(&player_doc).await;
-            let _ = store.save_community(&community_doc).await;
-            let _ = store.insert_structures(&docs).await;
-        });
-        return true;
     }
 
     if let Some(community_id) = player.community_id.clone() {
@@ -1636,6 +1523,183 @@ fn notify_approval_timeout(state: &mut GameState, pending: &PendingApproval) {
             send_system_message(state, requester_id, message_request_timed_out(lang).to_string());
         }
     }
+}
+
+async fn handle_community_build_request(app_state: &AppState, sid: &str, x: i32, y: i32) {
+    let mut state = app_state.state.write().await;
+    let (player_id, community_id) = match state.players.get(sid) {
+        Some(player) => (player.id.clone(), player.community_id.clone()),
+        None => return,
+    };
+    let lang = player_language(&state, &player_id);
+    if community_id.is_some() {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_community_already_member(lang).to_string(),
+        );
+        return;
+    }
+    if tile_at(&app_state.noise, x, y) == TILE_WATER {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_build_on_land(lang).to_string(),
+        );
+        return;
+    }
+
+    let area = community_area_origin(x, y);
+    if community_area_overlaps(&state, area) {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_community_area_overlap(lang).to_string(),
+        );
+        return;
+    }
+    if !community_area_is_clear(&state, area) {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_community_area_blocked(lang).to_string(),
+        );
+        return;
+    }
+    if resource_at_tile(&state, x, y) {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_clear_resource(lang).to_string(),
+        );
+        return;
+    }
+
+    let cost = [
+        ItemStack {
+            id: "wood".to_string(),
+            count: COMMUNITY_CREATE_WOOD,
+        },
+        ItemStack {
+            id: "stone".to_string(),
+            count: COMMUNITY_CREATE_STONE,
+        },
+    ];
+    let has_materials = match state.players.get(sid) {
+        Some(player) => has_items(&player.inventory, &cost),
+        None => return,
+    };
+    if !has_materials {
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_not_enough_materials(lang).to_string(),
+        );
+        return;
+    }
+    {
+        let player = match state.players.get_mut(sid) {
+            Some(player) => player,
+            None => return,
+        };
+        if !remove_items(&mut player.inventory, &cost) {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_not_enough_materials(lang).to_string(),
+            );
+            return;
+        }
+        player.last_inventory_hash = inventory_hash(&player.inventory);
+    }
+
+    let community_id = Uuid::new_v4().to_string();
+    let mut members = HashSet::new();
+    members.insert(player_id.clone());
+    let community = Community {
+        id: community_id.clone(),
+        members,
+        areas: vec![area],
+    };
+    insert_community_area_tiles(&mut state, &community_id, area);
+    state.communities.insert(community_id.clone(), community);
+    if let Some(player) = state.players.get_mut(sid) {
+        player.community_id = Some(community_id.clone());
+    }
+
+    let mut added_structures = Vec::new();
+    let well_id = state.next_structure_id();
+    let well = StructureTile {
+        id: well_id,
+        kind: "community_well".to_string(),
+        x,
+        y,
+        owner_id: community_id.clone(),
+    };
+    state
+        .structure_tiles
+        .insert(TileCoord { x, y }, well.clone());
+    added_structures.push(well);
+
+    let mut fence_structures = rebuild_community_fences(&mut state, app_state, &community_id);
+    added_structures.append(&mut fence_structures);
+
+    if let Some(player) = state.players.get(&player_id) {
+        let items = build_inventory_items(&player.inventory, app_state.data.as_ref(), lang);
+        if let Some(sender) = state.clients.get(&player_id) {
+            let _ = sender.send(ServerMessage::Inventory { items });
+        }
+    }
+
+    let mut chunks = HashSet::new();
+    for structure in &added_structures {
+        chunks.insert(chunk_coord_for_tile(
+            structure.x,
+            structure.y,
+            app_state.world.chunk_size,
+        ));
+    }
+    let public_structures: Vec<StructurePublic> =
+        added_structures.iter().map(StructurePublic::from).collect();
+    send_to_players_in_chunks(
+        &mut state,
+        app_state.world.chunk_size,
+        &chunks,
+        ServerMessage::StructureUpdate {
+            structures: public_structures.clone(),
+            state: "added".to_string(),
+        },
+    );
+    send_system_message(
+        &mut state,
+        &player_id,
+        message_community_created(lang).to_string(),
+    );
+
+    let store = app_state.store.clone();
+    let community_doc = CommunityDoc {
+        id: community_id.clone(),
+        members: vec![player_id.clone()],
+        areas: vec![area],
+    };
+    let player_doc = state.players.get(&player_id).map(|player| player.to_doc());
+    let docs: Vec<StructureDoc> = added_structures
+        .iter()
+        .map(|tile| StructureDoc {
+            id: tile.id as i64,
+            kind: tile.kind.clone(),
+            x: tile.x,
+            y: tile.y,
+            owner_id: tile.owner_id.clone(),
+        })
+        .collect();
+    tokio::spawn(async move {
+        if let Some(doc) = player_doc {
+            let _ = store.save_player(&doc).await;
+        }
+        let _ = store.save_community(&community_doc).await;
+        let _ = store.insert_structures(&docs).await;
+    });
 }
 
 async fn handle_group_build_request(
@@ -1969,7 +2033,7 @@ async fn handle_join_approval_complete(
         let _ = store
             .delete_structures_by_owner_and_kinds(
                 &community_id,
-                &["community_fence", "community_float"],
+                &["community_fence", "community_float", "community_gate"],
             )
             .await;
         let _ = store.insert_structures(&fence_docs).await;
@@ -2374,7 +2438,7 @@ fn remove_community_from_state(state: &mut GameState, community_id: &str) {
         }
         !matches!(
             structure.kind.as_str(),
-            "community_fence" | "community_float" | "community_well"
+            "community_fence" | "community_float" | "community_gate" | "community_well"
         )
     });
     state
@@ -2386,7 +2450,10 @@ fn remove_community_fences(state: &mut GameState, community_id: &str) -> Vec<Str
     let mut removed = Vec::new();
     state.structure_tiles.retain(|_, structure| {
         if structure.owner_id == community_id
-            && matches!(structure.kind.as_str(), "community_fence" | "community_float")
+            && matches!(
+                structure.kind.as_str(),
+                "community_fence" | "community_float" | "community_gate"
+            )
         {
             removed.push(structure.clone());
             return false;
@@ -2402,12 +2469,23 @@ fn rebuild_community_fences(
     community_id: &str,
 ) -> Vec<StructureTile> {
     let mut community_tiles = HashSet::new();
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
     for (tile, owner) in &state.community_tiles {
         if owner == community_id {
             community_tiles.insert(*tile);
+            min_x = min_x.min(tile.x);
+            max_x = max_x.max(tile.x);
+            min_y = min_y.min(tile.y);
+            max_y = max_y.max(tile.y);
         }
     }
     let mut added = Vec::new();
+    let center_x = (min_x + max_x) / 2;
+    let center_y = (min_y + max_y) / 2;
+    let mut boundary_tiles = Vec::new();
     for tile in &community_tiles {
         let neighbors = [
             TileCoord {
@@ -2430,7 +2508,29 @@ fn rebuild_community_fences(
         if neighbors.iter().all(|neighbor| community_tiles.contains(neighbor)) {
             continue;
         }
-        let kind = if tile_at(&app_state.noise, tile.x, tile.y) == TILE_WATER {
+        boundary_tiles.push(*tile);
+    }
+
+    let mut gate_tile: Option<TileCoord> = None;
+    let mut best_score = i32::MAX;
+    for tile in &boundary_tiles {
+        if tile_at(&app_state.noise, tile.x, tile.y) == TILE_WATER {
+            continue;
+        }
+        let score = (tile.x - center_x).abs() + (tile.y - center_y).abs();
+        if score < best_score {
+            best_score = score;
+            gate_tile = Some(*tile);
+        }
+    }
+    if gate_tile.is_none() {
+        gate_tile = boundary_tiles.first().copied();
+    }
+
+    for tile in boundary_tiles {
+        let kind = if Some(tile) == gate_tile {
+            "community_gate"
+        } else if tile_at(&app_state.noise, tile.x, tile.y) == TILE_WATER {
             "community_float"
         } else {
             "community_fence"
@@ -3775,7 +3875,7 @@ fn message_build_success(lang: Language, kind: &str) -> String {
             "road" => "Du baust eine Straße.".to_string(),
             "castle" => "Ihr baut ein Schloss.".to_string(),
             "silo" => "Ihr baut ein Lagerhaus.".to_string(),
-            "church" => "Ihr baut eine Kirche.".to_string(),
+            "church" => "Ihr baut ein Gemeinschaftsgebäude.".to_string(),
             _ => "Unbekannte Bauoption.".to_string(),
         },
         Language::En => match kind {
@@ -3787,7 +3887,7 @@ fn message_build_success(lang: Language, kind: &str) -> String {
             "road" => "You build a road.".to_string(),
             "castle" => "You build a castle together.".to_string(),
             "silo" => "You build a storage silo together.".to_string(),
-            "church" => "You build a church together.".to_string(),
+            "church" => "You build a community building together.".to_string(),
             _ => "Unknown build option.".to_string(),
         },
     }
@@ -3989,6 +4089,13 @@ fn message_community_not_member(lang: Language) -> &'static str {
     }
 }
 
+fn message_community_already_member(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du bist bereits in einer Gemeinschaft.",
+        Language::En => "You are already in a community.",
+    }
+}
+
 fn message_community_created(lang: Language) -> &'static str {
     match lang {
         Language::De => "Gemeinschaft gegründet.",
@@ -4096,10 +4203,10 @@ fn approval_build_text(
     let (kind_name, title) = match (lang, build_kind) {
         (Language::De, "castle") => ("Schloss", "Bauanfrage"),
         (Language::De, "silo") => ("Lagerhaus", "Bauanfrage"),
-        (Language::De, "church") => ("Kirche", "Bauanfrage"),
+        (Language::De, "church") => ("Gemeinschaftsgebäude", "Bauanfrage"),
         (Language::En, "castle") => ("Castle", "Build request"),
         (Language::En, "silo") => ("Silo", "Build request"),
-        (Language::En, "church") => ("Church", "Build request"),
+        (Language::En, "church") => ("Community building", "Build request"),
         _ => ("Build", "Build request"),
     };
     let costs = cost
@@ -4384,6 +4491,9 @@ fn can_walk(
         if structure.kind == "community_well" {
             return false;
         }
+        if matches!(structure.kind.as_str(), "community_fence" | "community_gate") {
+            return false;
+        }
         if matches!(
             structure.kind.as_str(),
             "hut_wood"
@@ -4410,6 +4520,11 @@ fn can_walk(
 
 fn can_walk_player(state: &GameState, noise: &WorldNoise, player: &Player, x: f32, y: f32) -> bool {
     let (tile_x, tile_y) = entity_foot_tile(x, y);
+    if let Some(structure) = state.structure_tiles.get(&TileCoord { x: tile_x, y: tile_y }) {
+        if structure.kind == "community_gate" {
+            return player.community_id.as_ref() == Some(&structure.owner_id);
+        }
+    }
     if let Some(community_id) = community_tile_owner(state, tile_x, tile_y) {
         if player.community_id.as_ref() != Some(community_id) {
             return false;
@@ -5223,6 +5338,7 @@ struct StructurePublic {
     kind: String,
     x: i32,
     y: i32,
+    owner_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5596,6 +5712,7 @@ impl From<&StructureTile> for StructurePublic {
             kind: structure.kind.clone(),
             x: structure.x,
             y: structure.y,
+            owner_id: structure.owner_id.clone(),
         }
     }
 }

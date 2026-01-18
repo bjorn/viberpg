@@ -70,9 +70,10 @@
       buildOptionBridgeStone: 'Stone Bridge (20 stone)',
       buildOptionPath: 'Path (shovel)',
       buildOptionRoad: 'Road (2 stone + shovel)',
+      buildOptionCommunity: 'Community (200 wood + 10 stone)',
       buildOptionCastle: 'Castle (10 members)',
       buildOptionSilo: 'Silo (2 members)',
-      buildOptionChurch: 'Church (3 members)',
+      buildOptionChurch: 'Community building (3 members)',
       buildOptionDemolish: 'Demolish',
       actionAttack: 'Attack',
       actionGather: 'Gather',
@@ -126,9 +127,10 @@
       buildOptionBridgeStone: 'Steinbrücke (20 Stein)',
       buildOptionPath: 'Pfad (Schaufel)',
       buildOptionRoad: 'Straße (2 Stein + Schaufel)',
+      buildOptionCommunity: 'Gemeinschaft (200 Holz + 10 Stein)',
       buildOptionCastle: 'Schloss (10 Mitglieder)',
       buildOptionSilo: 'Lagerhaus (2 Mitglieder)',
-      buildOptionChurch: 'Kirche (3 Mitglieder)',
+      buildOptionChurch: 'Gemeinschaftsgebäude (3 Mitglieder)',
       buildOptionDemolish: 'Abriss',
       actionAttack: 'Angriff',
       actionGather: 'Sammeln',
@@ -224,6 +226,7 @@
     'assets/entities/bridge-stone.svg',
     'assets/entities/fence-wood.svg',
     'assets/entities/float-wood.svg',
+    'assets/entities/gate-wood.svg',
     'assets/entities/well.svg',
     'assets/entities/path.svg',
     'assets/entities/road.svg',
@@ -248,6 +251,7 @@
   const resourceSprites = new Map();
   const structureSprites = new Map();
   const structureTiles = new Map();
+  const structureOwners = new Map();
   const playerEntities = new Map();
   const monsterEntities = new Map();
   const projectileSprites = new Map();
@@ -415,6 +419,7 @@
       bridge_stone: t('buildOptionBridgeStone'),
       path: t('buildOptionPath'),
       road: t('buildOptionRoad'),
+      community: t('buildOptionCommunity'),
       castle: t('buildOptionCastle'),
       silo: t('buildOptionSilo'),
       church: t('buildOptionChurch'),
@@ -739,7 +744,10 @@
   function ensureBuildPreview(kind) {
     if (!kind || kind === 'demolish') return;
     ensureTextures();
-    const textureKey = baseStructureKind(kind).replace(/_(h|v)$/, '');
+    const textureKey =
+      kind === 'community'
+        ? 'community_well'
+        : baseStructureKind(kind).replace(/_(h|v)$/, '');
     const texture = textures[textureKey];
     if (!texture) return;
     if (!buildPreviewSprite) {
@@ -1280,10 +1288,15 @@
   function canWalkLocal(x, y) {
     const tileX = Math.floor(x);
     const tileY = Math.floor(y);
-    const structureKind = structureTiles.get(tileKey(tileX, tileY));
+    const key = tileKey(tileX, tileY);
+    const structureKind = structureTiles.get(key);
     if (structureKind) {
       if (structureKind === 'community_float') {
         return true;
+      }
+      if (structureKind === 'community_gate') {
+        const ownerId = structureOwners.get(key);
+        return Boolean(playerState?.community_id && (!ownerId || ownerId === playerState.community_id));
       }
       if (structureKind.startsWith('bridge_')) {
         return true;
@@ -1346,6 +1359,7 @@
     'bridge_stone_v',
     'community_fence',
     'community_float',
+    'community_gate',
     'community_well',
     'hut_wood_root',
     'house_stone_root',
@@ -1383,6 +1397,7 @@
   const structureFootprints = new Map([
     ['hut_wood_root', { width: 2, height: 2 }],
     ['house_stone_root', { width: 3, height: 3 }],
+    ['community', { width: 1, height: 1 }],
     ['castle_root', { width: 8, height: 8 }],
     ['castle', { width: 8, height: 8 }],
     ['silo_root', { width: 3, height: 3 }],
@@ -1401,10 +1416,17 @@
 
   function recordStructureTile(structure) {
     structureTiles.set(tileKey(structure.x, structure.y), structure.kind);
+    if (structure.owner_id) {
+      structureOwners.set(tileKey(structure.x, structure.y), structure.owner_id);
+    } else {
+      structureOwners.delete(tileKey(structure.x, structure.y));
+    }
   }
 
   function removeStructureTile(structure) {
-    structureTiles.delete(tileKey(structure.x, structure.y));
+    const key = tileKey(structure.x, structure.y);
+    structureTiles.delete(key);
+    structureOwners.delete(key);
   }
 
   function upsertStructure(structure) {
@@ -1447,6 +1469,8 @@
         entry.sprite.x = (structure.x + 0.5) * tileSize;
         entry.sprite.y = (structure.y + 0.5) * tileSize;
         entry.sprite.rotation = structure.kind.endsWith('_v') ? Math.PI / 2 : 0;
+        entry.sprite.width = tileSize;
+        entry.sprite.height = tileSize;
       } else if (footprint) {
         entry.sprite.x = structure.x * tileSize;
         entry.sprite.y = structure.y * tileSize;
@@ -1454,9 +1478,29 @@
         entry.sprite.width = tileSize * footprint.width;
         entry.sprite.height = tileSize * footprint.height;
       } else {
-        entry.sprite.x = structure.x * tileSize;
-        entry.sprite.y = structure.y * tileSize;
-        entry.sprite.rotation = 0;
+        const isFence = structure.kind === 'community_fence' || baseKind === 'community_fence';
+        const isFloat = structure.kind === 'community_float' || baseKind === 'community_float';
+        const isGate = structure.kind === 'community_gate' || baseKind === 'community_gate';
+        const isWell = structure.kind === 'community_well' || baseKind === 'community_well';
+        if (isWell) {
+          entry.sprite.anchor.set(0.5, 0.5);
+          entry.sprite.x = (structure.x + 0.5) * tileSize;
+          entry.sprite.y = (structure.y + 0.5) * tileSize;
+          entry.sprite.rotation = 0;
+          entry.sprite.width = tileSize * 0.75;
+          entry.sprite.height = tileSize * 0.75;
+        } else if (isFence || isFloat || isGate) {
+          entry.sprite.anchor.set(0, 0);
+          entry.sprite.x = structure.x * tileSize;
+          entry.sprite.y = structure.y * tileSize;
+          entry.sprite.rotation = 0;
+          entry.sprite.width = tileSize;
+          entry.sprite.height = tileSize;
+        } else {
+          entry.sprite.x = structure.x * tileSize;
+          entry.sprite.y = structure.y * tileSize;
+          entry.sprite.rotation = 0;
+        }
       }
       if (footprint) {
         entry.sprite.zIndex = (structure.y + footprint.height) * tileSize;
@@ -1761,6 +1805,7 @@
     textures.bridge_stone = PIXI.Texture.from('assets/entities/bridge-stone.svg');
     textures.community_fence = PIXI.Texture.from('assets/entities/fence-wood.svg');
     textures.community_float = PIXI.Texture.from('assets/entities/float-wood.svg');
+    textures.community_gate = PIXI.Texture.from('assets/entities/gate-wood.svg');
     textures.community_well = PIXI.Texture.from('assets/entities/well.svg');
     textures.path = PIXI.Texture.from('assets/entities/path.svg');
     textures.road = PIXI.Texture.from('assets/entities/road.svg');
