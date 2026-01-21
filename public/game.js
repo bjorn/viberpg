@@ -21,6 +21,8 @@
   const dialogText = document.getElementById('dialog-text');
   const helpEl = document.getElementById('help');
   const fullscreenButton = document.getElementById('fullscreen-toggle');
+  const musicToggle = document.getElementById('music-toggle');
+  const sfxToggle = document.getElementById('sfx-toggle');
   const joystickEl = document.getElementById('touch-joystick');
   const joystickHandle = joystickEl ? joystickEl.querySelector('.stick-handle') : null;
   const actionButtons = Array.from(document.querySelectorAll('.action-btn'));
@@ -70,6 +72,8 @@
       helpTouch: 'Touch: drag screen or joystick to move · Tap Attack/Gather/Interact · Tap chat to type',
       inventoryEmpty: 'Empty',
       inventoryEat: 'Click to eat',
+      musicToggle: 'Toggle music',
+      sfxToggle: 'Toggle sound effects',
       hpLabel: 'HP',
     },
     de: {
@@ -114,6 +118,8 @@
       helpTouch: 'Touch: Bildschirm oder Joystick ziehen zum Laufen · Angriff/Sammeln/Interagieren tippen · Chat zum Tippen antippen',
       inventoryEmpty: 'Leer',
       inventoryEat: 'Klicken zum Essen',
+      musicToggle: 'Musik umschalten',
+      sfxToggle: 'Soundeffekte umschalten',
       hpLabel: 'HP',
     },
   };
@@ -348,6 +354,263 @@
     }
   }
 
+  const audioSettingsKey = 'audio-settings';
+  const defaultAudioSettings = {
+    musicEnabled: true,
+    sfxEnabled: true,
+    musicVolume: 0.25,
+    sfxVolume: 0.7,
+  };
+  let audioSettings = { ...defaultAudioSettings };
+  try {
+    const raw = localStorage.getItem(audioSettingsKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      audioSettings = { ...audioSettings, ...parsed };
+    }
+  } catch (err) {
+    console.warn('Audio settings load failed', err);
+  }
+
+  let audioContext = null;
+  let masterGain = null;
+  let musicGain = null;
+  let sfxGain = null;
+  let currentMusicSource = null;
+  const audioBuffers = new Map();
+  let audioUnlocked = false;
+  let currentMidiPart = null;
+  let currentMidiSynths = [];
+  const midiCache = new Map();
+
+  function saveAudioSettings() {
+    try {
+      localStorage.setItem(audioSettingsKey, JSON.stringify(audioSettings));
+    } catch (err) {
+      console.warn('Audio settings save failed', err);
+    }
+  }
+
+  function ensureAudioContext() {
+    if (!audioContext) {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor) {
+        console.warn('Web Audio not supported');
+        return null;
+      }
+      audioContext = new AudioContextCtor();
+      masterGain = audioContext.createGain();
+      musicGain = audioContext.createGain();
+      sfxGain = audioContext.createGain();
+      musicGain.connect(masterGain);
+      sfxGain.connect(masterGain);
+      masterGain.connect(audioContext.destination);
+      applyAudioSettings();
+    }
+    return audioContext;
+  }
+
+  function applyAudioSettings() {
+    if (!masterGain || !musicGain || !sfxGain) return;
+    const musicOn = Boolean(audioSettings.musicEnabled);
+    const sfxOn = Boolean(audioSettings.sfxEnabled);
+    masterGain.gain.value = 1;
+    musicGain.gain.value = musicOn ? Math.max(0, audioSettings.musicVolume ?? 0.25) : 0;
+    sfxGain.gain.value = sfxOn ? Math.max(0, audioSettings.sfxVolume ?? 0.7) : 0;
+    updateMidiVolume();
+    setToggleButtonState(
+      musicToggle,
+      musicOn,
+      `${t('musicToggle')} (On)`,
+      `${t('musicToggle')} (Off)`
+    );
+    setToggleButtonState(
+      sfxToggle,
+      sfxOn,
+      `${t('sfxToggle')} (On)`,
+      `${t('sfxToggle')} (Off)`
+    );
+  }
+
+  function setToggleButtonState(button, enabled, labelOn, labelOff) {
+    if (!button) return;
+    button.classList.toggle('active', enabled);
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', enabled ? labelOn : labelOff);
+    button.setAttribute('title', enabled ? labelOn : labelOff);
+  }
+
+  async function unlockAudioContext() {
+    if (audioUnlocked) return;
+    const ctx = ensureAudioContext();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+    audioUnlocked = true;
+  }
+
+  async function loadAudioBuffer(url) {
+    if (audioBuffers.has(url)) {
+      return audioBuffers.get(url);
+    }
+    const ctx = ensureAudioContext();
+    if (!ctx) return null;
+    const response = await fetch(url);
+    const data = await response.arrayBuffer();
+    const buffer = await ctx.decodeAudioData(data);
+    audioBuffers.set(url, buffer);
+    return buffer;
+  }
+
+  async function playMusic(url, { loop = true } = {}) {
+    const ctx = ensureAudioContext();
+    if (!ctx) return;
+    const buffer = await loadAudioBuffer(url);
+    if (!buffer) return;
+    if (currentMusicSource) {
+      try {
+        currentMusicSource.stop();
+      } catch (err) {
+        console.warn('Music stop failed', err);
+      }
+      currentMusicSource.disconnect();
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = loop;
+    source.connect(musicGain);
+    source.start(0);
+    currentMusicSource = source;
+  }
+
+  function stopMusic() {
+    if (!currentMusicSource) return;
+    try {
+      currentMusicSource.stop();
+    } catch (err) {
+      console.warn('Music stop failed', err);
+    }
+    currentMusicSource.disconnect();
+    currentMusicSource = null;
+  }
+
+  async function playSfx(url, { volume = 1 } = {}) {
+    const ctx = ensureAudioContext();
+    if (!ctx) return;
+    const buffer = await loadAudioBuffer(url);
+    if (!buffer) return;
+    const source = ctx.createBufferSource();
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = Math.max(0, volume);
+    source.buffer = buffer;
+    source.connect(gainNode);
+    gainNode.connect(sfxGain);
+    source.start(0);
+  }
+
+  async function loadMidi(url) {
+    if (midiCache.has(url)) {
+      return midiCache.get(url);
+    }
+    try {
+      const midi = await Midi.fromUrl(url);
+      midiCache.set(url, midi);
+      return midi;
+    } catch (err) {
+      console.error('MIDI load failed:', err);
+      return null;
+    }
+  }
+
+  async function playMidi(url, { loop = true } = {}) {
+    ensureAudioContext();
+    if (!Tone || !Midi) {
+      console.warn('Tone.js or @tonejs/midi not loaded');
+      return;
+    }
+    await Tone.start();
+    audioUnlocked = true;
+
+    stopMidi();
+
+    const midi = await loadMidi(url);
+    if (!midi) return;
+
+    const synths = [];
+    midi.tracks.forEach((track) => {
+      const synth = new Tone.PolySynth(Tone.Synth, {
+        maxPolyphony: 8,
+        oscillator: { type: 'triangle' },
+        envelope: { attack: 0.005, decay: 0.1, sustain: 0.4, release: 0.3 },
+      });
+      const gain = new Tone.Gain(audioSettings.musicVolume ?? 0.25);
+      synth.connect(gain);
+      gain.connect(Tone.getDestination());
+      synths.push({ synth, gain, track });
+    });
+    currentMidiSynths = synths;
+
+    const part = new Tone.Part((time, note) => {
+      const synthEntry = synths[note.trackIndex];
+      if (synthEntry) {
+        synthEntry.synth.triggerAttackRelease(
+          note.name,
+          note.duration,
+          time,
+          note.velocity
+        );
+      }
+    }, []);
+
+    midi.tracks.forEach((track, trackIndex) => {
+      track.notes.forEach((note) => {
+        part.add({
+          time: note.time,
+          trackIndex,
+          name: note.name,
+          duration: note.duration,
+          velocity: note.velocity,
+        });
+      });
+    });
+
+    part.loop = loop;
+    part.loopEnd = midi.duration;
+    part.start(0);
+    Tone.getTransport().start();
+    currentMidiPart = part;
+  }
+
+  function stopMidi() {
+    if (currentMidiPart) {
+      currentMidiPart.stop();
+      currentMidiPart.dispose();
+      currentMidiPart = null;
+    }
+    if (currentMidiSynths.length > 0) {
+      currentMidiSynths.forEach(({ synth, gain }) => {
+        synth.releaseAll();
+        synth.dispose();
+        gain.dispose();
+      });
+      currentMidiSynths = [];
+    }
+    if (Tone && Tone.getTransport) {
+      Tone.getTransport().stop();
+      Tone.getTransport().position = 0;
+    }
+  }
+
+  function updateMidiVolume() {
+    if (currentMidiSynths.length > 0) {
+      const vol = audioSettings.musicEnabled ? (audioSettings.musicVolume ?? 0.25) : 0;
+      currentMidiSynths.forEach(({ gain }) => {
+        gain.gain.rampTo(vol, 0.1);
+      });
+    }
+  }
+
   function applyLocale() {
     setStatusText(t('statusConnecting'));
     renderStatusHearts(lastStatusHp ?? 0);
@@ -389,6 +652,18 @@
     if (uiScaleUp) {
       uiScaleUp.setAttribute('aria-label', t('uiScaleUp'));
       uiScaleUp.setAttribute('title', t('uiScaleUp'));
+    }
+    if (musicToggle) {
+      const label = t('musicToggle');
+      musicToggle.textContent = label;
+      musicToggle.setAttribute('aria-label', label);
+      musicToggle.setAttribute('title', label);
+    }
+    if (sfxToggle) {
+      const label = t('sfxToggle');
+      sfxToggle.textContent = label;
+      sfxToggle.setAttribute('aria-label', label);
+      sfxToggle.setAttribute('title', label);
     }
     if (fullscreenButton) {
       updateFullscreenButton();
@@ -940,6 +1215,22 @@
     const pulseKey = `${action}Pulse`;
     if (pulseKey in touchState) {
       touchState[pulseKey] = true;
+    }
+    playSfxForAction(action);
+  }
+
+  function playSfxForAction(action) {
+    if (!audioSettings.sfxEnabled) return;
+    switch (action) {
+      case 'attack':
+        playSfx('assets/sfx/attack.ogg', { volume: 0.6 }).catch(() => {});
+        break;
+      case 'gather':
+        playSfx('assets/sfx/gather.ogg', { volume: 0.5 }).catch(() => {});
+        break;
+      case 'interact':
+        playSfx('assets/sfx/interact.ogg', { volume: 0.5 }).catch(() => {});
+        break;
     }
   }
 
@@ -2237,6 +2528,15 @@
           setStatusCoords(`${msg.player.x.toFixed(1)}, ${msg.player.y.toFixed(1)}`);
           syncPlayers([msg.player], false);
           requestChunksAround();
+
+          // Auto-start background music after first connection
+          (async () => {
+            await unlockAudioContext();
+            if (audioSettings.musicEnabled) {
+              playMidi('assets/music/calm_spheric_loop.mid', { loop: true });
+            }
+          })().catch((err) => console.warn('Background music start failed:', err));
+
           break;
         }
         case 'chunk_data': {
@@ -2457,6 +2757,13 @@
     if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight', 'Space', 'KeyF', 'KeyE'].includes(event.code) || arrowKey) {
       event.preventDefault();
     }
+    if (event.code === 'Space') {
+      playSfxForAction('attack');
+    } else if (event.code === 'KeyF') {
+      playSfxForAction('gather');
+    } else if (event.code === 'KeyE') {
+      playSfxForAction('interact');
+    }
     if (event.code === 'Enter') {
       chatInput.focus();
     }
@@ -2604,6 +2911,24 @@
       lastChunkPrune = now;
     }
   });
+
+  if (musicToggle) {
+    musicToggle.addEventListener('click', async () => {
+      await unlockAudioContext();
+      audioSettings.musicEnabled = !audioSettings.musicEnabled;
+      applyAudioSettings();
+      saveAudioSettings();
+    });
+  }
+
+  if (sfxToggle) {
+    sfxToggle.addEventListener('click', async () => {
+      await unlockAudioContext();
+      audioSettings.sfxEnabled = !audioSettings.sfxEnabled;
+      applyAudioSettings();
+      saveAudioSettings();
+    });
+  }
 
   applyLocale();
   if (inventoryPanel) {

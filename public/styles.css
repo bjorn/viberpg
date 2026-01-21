@@ -92,6 +92,36 @@ canvas {
   pointer-events: auto;
 }
 
+#music-toggle,
+#sfx-toggle {
+  min-width: 56px;
+  min-height: 40px;
+  padding: 6px 10px;
+  font-family: "VT323", monospace;
+  font-size: 16px;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(8, 12, 16, 0.7);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+#music-toggle.active,
+#sfx-toggle.active {
+  color: var(--accent-2);
+  border-color: rgba(240, 211, 132, 0.6);
+  box-shadow: 0 0 12px rgba(240, 211, 132, 0.25);
+}
+
+#music-toggle:active,
+#sfx-toggle:active {
+  transform: translateY(1px);
+}
+
 #fullscreen-toggle {
   position: relative;
   z-index: 1;
