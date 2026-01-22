@@ -38,6 +38,16 @@
     "ammo_for": null
   },
   {
+    "id": "rabbit_leg",
+    "name": "Rabbit Leg",
+    "kind": "food",
+    "tool": null,
+    "power": null,
+    "heal": 4,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
     "id": "slime_core",
     "name": "Slime Core",
     "kind": "resource",

@@ -1415,40 +1415,80 @@ fn update_monsters(
             None => continue,
         };
         let mut target = None;
+        let mut target_pos = None;
         let mut nearest_dist = f32::MAX;
         for (id, px, py) in &player_positions {
             let dist = distance(*px, *py, monster.x, monster.y);
             if dist < nearest_dist {
                 nearest_dist = dist;
                 target = Some(id.clone());
+                target_pos = Some((*px, *py));
             }
         }
 
-        if let Some(target_id) = target {
-            if nearest_dist <= MONSTER_AGGRO_RANGE {
-                monster.target = Some(target_id.clone());
-                let (tx, ty) = player_positions
-                    .iter()
-                    .find(|(id, _, _)| id == &target_id)
-                    .map(|(_, x, y)| (*x, *y))
-                    .unwrap_or((monster.x, monster.y));
-                move_towards(
-                    monster,
-                    tx,
-                    ty,
-                    def.speed,
-                    dt,
-                    structure_tiles,
-                    noise,
-                );
+        match def.behavior {
+            MonsterBehavior::Aggressive => {
+                if let Some(target_id) = target {
+                    if nearest_dist <= MONSTER_AGGRO_RANGE {
+                        monster.target = Some(target_id.clone());
+                        let (tx, ty) = target_pos.unwrap_or((monster.x, monster.y));
+                        move_towards(
+                            monster,
+                            tx,
+                            ty,
+                            def.speed,
+                            dt,
+                            structure_tiles,
+                            noise,
+                        );
 
-                if nearest_dist <= MONSTER_ATTACK_RANGE
-                    && now_ms - monster.last_attack_ms >= 800
-                {
-                    damage_events.push((target_id.clone(), def.damage, monster.kind.clone()));
-                    monster.last_attack_ms = now_ms;
+                        if nearest_dist <= MONSTER_ATTACK_RANGE
+                            && now_ms - monster.last_attack_ms >= 800
+                        {
+                            damage_events
+                                .push((target_id.clone(), def.damage, monster.kind.clone()));
+                            monster.last_attack_ms = now_ms;
+                        }
+                    } else {
+                        wander(
+                            monster,
+                            now_ms,
+                            def.speed,
+                            dt,
+                            structure_tiles,
+                            noise,
+                        );
+                    }
+                } else {
+                    wander(
+                        monster,
+                        now_ms,
+                        def.speed,
+                        dt,
+                        structure_tiles,
+                        noise,
+                    );
                 }
-            } else {
+            }
+            MonsterBehavior::Timid => {
+                monster.target = None;
+                if let Some((tx, ty)) = target_pos {
+                    if nearest_dist <= MONSTER_AGGRO_RANGE {
+                        move_away(
+                            monster,
+                            tx,
+                            ty,
+                            def.speed,
+                            dt,
+                            structure_tiles,
+                            noise,
+                            now_ms,
+                            monster.kind == "rabbit",
+                        );
+                        continue;
+                    }
+                }
+                monster.flee_dir = None;
                 wander(
                     monster,
                     now_ms,
@@ -1458,15 +1498,6 @@ fn update_monsters(
                     noise,
                 );
             }
-        } else {
-            wander(
-                monster,
-                now_ms,
-                def.speed,
-                dt,
-                structure_tiles,
-                noise,
-            );
         }
     }
 
@@ -2015,6 +2046,7 @@ fn localize_item_name(data: &GameData, item_id: &str, lang: Language) -> String 
         "apple" => "Apfel",
         "stone" => "Stein",
         "boar_leg" => "Wildschweinkeule",
+        "rabbit_leg" => "Kaninchenkeule",
         "slime_core" => "Schleimkern",
         "arrow" => "Pfeil",
         "basic_axe" => "Einfache Axt",
@@ -2066,6 +2098,7 @@ fn localize_monster_name(data: &GameData, monster_id: &str, lang: Language) -> S
     }
     let localized = match monster_id {
         "boar" => "Wildschwein",
+        "rabbit" => "Kaninchen",
         _ => return data
             .monsters
             .get(monster_id)
@@ -2456,6 +2489,89 @@ fn move_towards(
     }
 }
 
+fn move_away(
+    monster: &mut Monster,
+    tx: f32,
+    ty: f32,
+    speed: f32,
+    dt: f32,
+    structure_tiles: &HashMap<TileCoord, StructureTile>,
+    noise: &WorldNoise,
+    now_ms: i64,
+    sample_directions: bool,
+) {
+    let dx = monster.x - tx;
+    let dy = monster.y - ty;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if dist <= f32::EPSILON {
+        return;
+    }
+    let step = speed * dt;
+    let ux = dx / dist;
+    let uy = dy / dist;
+    let attempt_move = |dir_x: f32, dir_y: f32, monster: &mut Monster| -> bool {
+        let mut moved = false;
+        let next_x = monster.x + dir_x * step;
+        if can_walk(structure_tiles, noise, next_x, monster.y) {
+            monster.x = next_x;
+            moved = true;
+        }
+        let next_y = monster.y + dir_y * step;
+        if can_walk(structure_tiles, noise, monster.x, next_y) {
+            monster.y = next_y;
+            moved = true;
+        }
+        moved
+    };
+    if sample_directions {
+        if now_ms >= monster.flee_next_sample_ms {
+            monster.flee_dir = None;
+            monster.flee_next_sample_ms = now_ms + 1000;
+            let rot = 0.70710677_f32;
+            let candidates = [
+                (ux, uy),
+                (ux * rot - uy * rot, ux * rot + uy * rot),
+                (ux * rot + uy * rot, -ux * rot + uy * rot),
+                (-uy, ux),
+                (uy, -ux),
+            ];
+            let start_x = monster.x;
+            let start_y = monster.y;
+            let mut best = None;
+            let mut best_dist = f32::NEG_INFINITY;
+            for (cx, cy) in candidates {
+                let mut next_x = start_x;
+                let mut next_y = start_y;
+                let step_x = start_x + cx * step;
+                if can_walk(structure_tiles, noise, step_x, start_y) {
+                    next_x = step_x;
+                }
+                let step_y = start_y + cy * step;
+                if can_walk(structure_tiles, noise, next_x, step_y) {
+                    next_y = step_y;
+                }
+                if (next_x - start_x).abs() <= f32::EPSILON
+                    && (next_y - start_y).abs() <= f32::EPSILON
+                {
+                    continue;
+                }
+                let cand_dist = distance(next_x, next_y, tx, ty);
+                if cand_dist > best_dist {
+                    best_dist = cand_dist;
+                    best = Some((cx, cy));
+                }
+            }
+            monster.flee_dir = best;
+        }
+        if let Some((sx, sy)) = monster.flee_dir {
+            if attempt_move(sx, sy, monster) {
+                return;
+            }
+        }
+    }
+    attempt_move(ux, uy, monster);
+}
+
 fn wander(
     monster: &mut Monster,
     now_ms: i64,
@@ -2673,11 +2789,34 @@ fn spawn_monsters_for_chunk(
     noise: &WorldNoise,
     data: &GameData,
 ) {
+    let mut monster_defs: Vec<&MonsterDef> = data.monsters.values().collect();
+    monster_defs.sort_by(|a, b| a.id.cmp(&b.id));
+    if monster_defs.is_empty() {
+        return;
+    }
+    let total_weight: u32 = monster_defs
+        .iter()
+        .map(|def| def.spawn_weight.max(1))
+        .sum();
+    if total_weight == 0 {
+        return;
+    }
+
     let chunk_size = world.chunk_size;
     let base = hash_u64(seed ^ (coord.x as u64).wrapping_mul(0xD1B54A32) ^ coord.y as u64);
     let count = (base % 3) as i32;
     for i in 0..count {
         let local_seed = hash_u64(base.wrapping_add(i as u64));
+        let mut roll = (local_seed % total_weight as u64) as u32;
+        let mut chosen = monster_defs[0];
+        for def in &monster_defs {
+            let weight = def.spawn_weight.max(1);
+            if roll < weight {
+                chosen = def;
+                break;
+            }
+            roll -= weight;
+        }
         let lx = (local_seed % chunk_size as u64) as i32;
         let ly = ((local_seed >> 8) % chunk_size as u64) as i32;
         let wx = coord.x * chunk_size + lx;
@@ -2691,18 +2830,16 @@ fn spawn_monsters_for_chunk(
             monster_id,
             Monster {
                 id: monster_id,
-                kind: "boar".to_string(),
+                kind: chosen.id.clone(),
                 x: spawn_x,
                 y: spawn_y,
-                hp: data
-                    .monsters
-                    .get("boar")
-                    .map(|m| m.hp)
-                    .unwrap_or(6),
+                hp: chosen.hp,
                 target: None,
                 wander_dir: (0.0, 0.0),
                 wander_until_ms: 0,
                 last_attack_ms: 0,
+                flee_dir: None,
+                flee_next_sample_ms: 0,
             },
         );
     }
@@ -3180,6 +3317,8 @@ struct Monster {
     wander_dir: (f32, f32),
     wander_until_ms: i64,
     last_attack_ms: i64,
+    flee_dir: Option<(f32, f32)>,
+    flee_next_sample_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -3274,6 +3413,23 @@ struct ResourceDef {
     drops: Vec<ItemStack>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MonsterBehavior {
+    Aggressive,
+    Timid,
+}
+
+impl Default for MonsterBehavior {
+    fn default() -> Self {
+        MonsterBehavior::Aggressive
+    }
+}
+
+fn default_spawn_weight() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MonsterDef {
     id: String,
@@ -3282,6 +3438,10 @@ struct MonsterDef {
     speed: f32,
     damage: i32,
     drop: Option<ItemStack>,
+    #[serde(default)]
+    behavior: MonsterBehavior,
+    #[serde(default = "default_spawn_weight")]
+    spawn_weight: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -199,6 +199,7 @@
     'assets/entities/npc.svg',
     'assets/entities/slime.svg',
     'assets/entities/boar.svg',
+    'assets/entities/rabbit.svg',
     'assets/entities/arrow.svg',
   ];
   await PIXI.Assets.load([...tileAssetUrls, ...entityAssetUrls]);
@@ -1334,15 +1335,19 @@
     monsters.forEach((monster) => {
       seen.add(monster.id);
       let entity = monsterEntities.get(monster.id);
+      const texture = textures[monster.kind] || textures.slime;
       if (!entity) {
-        const texture = textures[monster.kind] || textures.slime;
         const sprite = new PIXI.Sprite(texture);
         sprite.anchor.set(0.5, 0.9);
         entityLayer.addChild(sprite);
-        entity = createEntityState(sprite, monster.x, monster.y, now);
+        entity = createEntityState(sprite, monster.x, monster.y, now, { kind: monster.kind });
         monsterEntities.set(monster.id, entity);
       } else {
         updateEntityTarget(entity, monster.x, monster.y, now);
+        entity.kind = monster.kind;
+        if (entity.sprite.texture !== texture) {
+          entity.sprite.texture = texture;
+        }
       }
     });
 
@@ -1551,6 +1556,7 @@
     textures.npc = PIXI.Texture.from('assets/entities/npc.svg');
     textures.slime = PIXI.Texture.from('assets/entities/slime.svg');
     textures.boar = PIXI.Texture.from('assets/entities/boar.svg');
+    textures.rabbit = PIXI.Texture.from('assets/entities/rabbit.svg');
     textures.arrow = PIXI.Texture.from('assets/entities/arrow.svg');
 
     return textures;
@@ -1599,6 +1605,7 @@
       walkOffset: Math.random() * Math.PI * 2,
       label: options.label ?? null,
       name: options.name ?? null,
+      kind: options.kind ?? null,
     };
   }
 
@@ -1761,6 +1768,27 @@
     }
   }
 
+  function applyRabbitHopAnimation(entity, now, baseY) {
+    const moveDistance = Math.hypot(entity.targetX - entity.startX, entity.targetY - entity.startY);
+    const sprite = entity.sprite;
+    if (moveDistance > 0.01) {
+      const phase = now / 120 + entity.walkOffset;
+      const hop = Math.max(0, Math.sin(phase));
+      const lift = hop * tileSize * 0.12;
+      sprite.scale.x = 1 - hop * 0.06;
+      sprite.scale.y = 1 + hop * 0.08;
+      sprite.rotation = 0;
+      sprite.skew.x = 0;
+      sprite.y = baseY - lift;
+    } else {
+      sprite.scale.x = 1;
+      sprite.scale.y = 1;
+      sprite.rotation = 0;
+      sprite.skew.x = 0;
+      sprite.y = baseY;
+    }
+  }
+
   function setActionAvailability(action, available) {
     const button = actionButtonsByAction.get(action);
     if (!button) return;
@@ -1856,8 +1884,13 @@
       entity.y = lerp(entity.startY, entity.targetY, t);
       const basePos = worldToPixels(entity.x, entity.y);
       entity.sprite.x = basePos.x;
-      entity.sprite.y = basePos.y;
-      entity.sprite.zIndex = basePos.y;
+      const baseY = basePos.y;
+      if (entity.kind === 'rabbit') {
+        applyRabbitHopAnimation(entity, now, baseY);
+      } else {
+        entity.sprite.y = baseY;
+      }
+      entity.sprite.zIndex = baseY;
     }
 
     structureLayer.sortChildren();
