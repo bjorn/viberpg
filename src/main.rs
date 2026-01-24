@@ -884,6 +884,12 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             state: "added".to_string(),
         },
     );
+    if let Some(sender) = state.clients.get(sid) {
+        let _ = sender.send(ServerMessage::StructureUpdate {
+            structures: structures_public.clone(),
+            state: "added".to_string(),
+        });
+    }
     send_system_message(
         &mut state,
         &player_id,
