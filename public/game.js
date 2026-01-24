@@ -211,6 +211,8 @@
   let tileAtlasSize = null;
 
   const chunkTiles = new Map();
+  const chunkResources = new Map();
+  const chunkStructures = new Map();
   const resourceSprites = new Map();
   const structureSprites = new Map();
   const structureTiles = new Map();
@@ -247,6 +249,8 @@
 
   const loadedChunks = new Set();
   const pendingChunks = new Set();
+  const CHUNK_REQUEST_RADIUS = 2;
+  const CHUNK_KEEP_RADIUS = 3;
 
   const keys = new Set();
   const touchState = {
@@ -280,6 +284,7 @@
   let lastTypingSent = 0;
   let lastStatusUpdate = 0;
   let lastChunkRequest = 0;
+  let lastChunkPrune = 0;
   let joystickPointerId = null;
   let joystickCenter = { x: 0, y: 0 };
   let joystickMaxRadius = 0;
@@ -1009,6 +1014,12 @@
     return `${x},${y}`;
   }
 
+  function chunkKeyForTile(x, y) {
+    const cx = Math.floor(x / chunkSize);
+    const cy = Math.floor(y / chunkSize);
+    return chunkKey(cx, cy);
+  }
+
   function requestChunksAround() {
     if (!wsOpen) return;
     const playerEntity = playerEntities.get(playerId);
@@ -1018,8 +1029,8 @@
     const cx = Math.floor(px / chunkSize);
     const cy = Math.floor(py / chunkSize);
     const needed = [];
-    for (let dx = -2; dx <= 2; dx += 1) {
-      for (let dy = -2; dy <= 2; dy += 1) {
+    for (let dx = -CHUNK_REQUEST_RADIUS; dx <= CHUNK_REQUEST_RADIUS; dx += 1) {
+      for (let dy = -CHUNK_REQUEST_RADIUS; dy <= CHUNK_REQUEST_RADIUS; dy += 1) {
         const nx = cx + dx;
         const ny = cy + dy;
         const key = chunkKey(nx, ny);
@@ -1038,6 +1049,12 @@
     ensureTextures();
     const key = chunkKey(chunk.chunk_x, chunk.chunk_y);
     pendingChunks.delete(key);
+    if (!shouldKeepChunk(chunk.chunk_x, chunk.chunk_y)) {
+      if (loadedChunks.has(key)) {
+        unloadChunk(key);
+      }
+      return;
+    }
     const existing = chunkTiles.get(key);
     const container = existing?.container || createTilemapLayer();
     if (typeof container.clear === 'function') {
@@ -1083,8 +1100,149 @@
       existing.tiles = chunk.tiles;
     }
     loadedChunks.add(key);
-    chunk.resources.forEach((res) => upsertResource(res));
-    syncStructures(chunk.structures);
+    replaceChunkResources(key, chunk.resources);
+    replaceChunkStructures(key, chunk.structures);
+  }
+
+  function shouldKeepChunk(cx, cy) {
+    const playerEntity = playerEntities.get(playerId);
+    const px = playerEntity ? playerEntity.x : playerState?.x;
+    const py = playerEntity ? playerEntity.y : playerState?.y;
+    if (px == null || py == null) return true;
+    const centerX = Math.floor(px / chunkSize);
+    const centerY = Math.floor(py / chunkSize);
+    return Math.abs(cx - centerX) <= CHUNK_KEEP_RADIUS && Math.abs(cy - centerY) <= CHUNK_KEEP_RADIUS;
+  }
+
+  function unloadChunk(key) {
+    const entry = chunkTiles.get(key);
+    if (entry) {
+      if (entry.container.parent) {
+        entry.container.parent.removeChild(entry.container);
+      }
+      if (typeof entry.container.destroy === 'function') {
+        entry.container.destroy({ children: true });
+      }
+      chunkTiles.delete(key);
+    }
+    loadedChunks.delete(key);
+    pendingChunks.delete(key);
+    const resources = chunkResources.get(key);
+    if (resources) {
+      for (const id of resources) {
+        removeResource(id);
+      }
+      chunkResources.delete(key);
+    }
+    const structures = chunkStructures.get(key);
+    if (structures) {
+      for (const structure of structures.values()) {
+        removeStructure(structure);
+      }
+      chunkStructures.delete(key);
+    }
+  }
+
+  function replaceChunkResources(key, resources) {
+    const next = new Set();
+    for (const resource of resources) {
+      next.add(resource.id);
+      upsertResource(resource);
+    }
+    const existing = chunkResources.get(key);
+    if (existing) {
+      for (const id of existing) {
+        if (!next.has(id)) {
+          removeResource(id);
+        }
+      }
+    }
+    if (next.size > 0) {
+      chunkResources.set(key, next);
+    } else {
+      chunkResources.delete(key);
+    }
+  }
+
+  function replaceChunkStructures(key, structures) {
+    const next = new Map();
+    for (const structure of structures) {
+      const sKey = structureKey(structure);
+      next.set(sKey, structure);
+      upsertStructure(structure);
+    }
+    const existing = chunkStructures.get(key);
+    if (existing) {
+      for (const [sKey, structure] of existing) {
+        if (!next.has(sKey)) {
+          removeStructure(structure);
+        }
+      }
+    }
+    if (next.size > 0) {
+      chunkStructures.set(key, next);
+    } else {
+      chunkStructures.delete(key);
+    }
+  }
+
+  function addResourceToChunk(key, id) {
+    let set = chunkResources.get(key);
+    if (!set) {
+      set = new Set();
+      chunkResources.set(key, set);
+    }
+    set.add(id);
+  }
+
+  function removeResourceFromChunk(key, id) {
+    const set = chunkResources.get(key);
+    if (!set) return;
+    set.delete(id);
+    if (!set.size) {
+      chunkResources.delete(key);
+    }
+  }
+
+  function addStructureToChunk(key, structure) {
+    let map = chunkStructures.get(key);
+    if (!map) {
+      map = new Map();
+      chunkStructures.set(key, map);
+    }
+    map.set(structureKey(structure), structure);
+  }
+
+  function removeStructureFromChunk(key, structure) {
+    const map = chunkStructures.get(key);
+    if (!map) return;
+    map.delete(structureKey(structure));
+    if (!map.size) {
+      chunkStructures.delete(key);
+    }
+  }
+
+  function pruneChunksAround() {
+    const playerEntity = playerEntities.get(playerId);
+    const px = playerEntity ? playerEntity.x : playerState?.x;
+    const py = playerEntity ? playerEntity.y : playerState?.y;
+    if (px == null || py == null) return;
+    const cx = Math.floor(px / chunkSize);
+    const cy = Math.floor(py / chunkSize);
+    for (const key of Array.from(loadedChunks)) {
+      const [x, y] = key.split(',').map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (Math.abs(x - cx) > CHUNK_KEEP_RADIUS || Math.abs(y - cy) > CHUNK_KEEP_RADIUS) {
+        unloadChunk(key);
+      }
+    }
+    for (const key of Array.from(pendingChunks)) {
+      const [x, y] = key.split(',').map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (Math.abs(x - cx) > CHUNK_KEEP_RADIUS || Math.abs(y - cy) > CHUNK_KEEP_RADIUS) {
+        pendingChunks.delete(key);
+      }
+    }
   }
 
   function getTileIdAt(tileX, tileY) {
@@ -2189,18 +2347,27 @@
           break;
         }
         case 'resource_update': {
+          const key = chunkKeyForTile(msg.resource.x, msg.resource.y);
           if (msg.state === 'removed') {
             removeResource(msg.resource.id);
+            removeResourceFromChunk(key, msg.resource.id);
           } else {
             upsertResource(msg.resource);
+            addResourceToChunk(key, msg.resource.id);
           }
           break;
         }
         case 'structure_update': {
           if (msg.state === 'removed') {
-            msg.structures.forEach((structure) => removeStructure(structure));
+            msg.structures.forEach((structure) => {
+              removeStructure(structure);
+              removeStructureFromChunk(chunkKeyForTile(structure.x, structure.y), structure);
+            });
           } else {
-            msg.structures.forEach((structure) => upsertStructure(structure));
+            msg.structures.forEach((structure) => {
+              upsertStructure(structure);
+              addStructureToChunk(chunkKeyForTile(structure.x, structure.y), structure);
+            });
           }
           break;
         }
@@ -2513,6 +2680,10 @@
     if (now - lastChunkRequest > 500) {
       requestChunksAround();
       lastChunkRequest = now;
+    }
+    if (now - lastChunkPrune > 1000) {
+      pruneChunksAround();
+      lastChunkPrune = now;
     }
   });
 
