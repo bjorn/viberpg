@@ -151,6 +151,7 @@ async fn main() -> AppResult<()> {
         .unwrap_or(3000);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("listening on {}", addr);
+    println!("open in browser: http://localhost:{}", port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
