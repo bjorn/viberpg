@@ -880,7 +880,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         app_state.world.chunk_size,
         &chunks,
         ServerMessage::StructureUpdate {
-            structures: structures_public,
+            structures: structures_public.clone(),
             state: "added".to_string(),
         },
     );
