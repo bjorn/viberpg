@@ -34,6 +34,8 @@ const ENTITY_FOOT_OFFSET_Y: f32 = 0.9;
 const SAVE_INTERVAL_MS: i64 = 5_000;
 const MAX_HP: i32 = 10;
 const PLAYER_REGEN_INTERVAL_MS: i64 = 5_000;
+const FISH_MIN_CLICKS: i32 = 1;
+const FISH_MAX_CLICKS: i32 = 10;
 const TYPING_TIMEOUT_MS: i64 = 2500;
 const CHUNK_KEEP_RADIUS: i32 = 3;
 const ENTITY_VISIBILITY_RADIUS: i32 = 2;
@@ -217,7 +219,7 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String, lang
         }
     });
 
-    let doc = app_state
+    let mut doc = app_state
         .store
         .load_or_create_player(&sid, &app_state.world, &app_state.noise)
         .await
@@ -226,6 +228,30 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String, lang
             default_player_doc(&sid, &app_state.world, &app_state.noise)
         });
 
+    let (doc_x, doc_y) = player_position_from_doc(&doc);
+    let (tile_x, tile_y) = entity_foot_tile(doc_x, doc_y);
+    let needs_land = tile_at(&app_state.noise, tile_x, tile_y) == TILE_WATER
+        && {
+            let state = app_state.state.read().await;
+            match state.structure_tiles.get(&TileCoord { x: tile_x, y: tile_y }) {
+                Some(structure) => structure.kind != "boat",
+                None => true,
+            }
+        };
+    if needs_land {
+        let fallback = || spawn_near_campfire(&app_state.world, &app_state.noise);
+        let (nx, ny) = find_nearest_land_anchor(&app_state.noise, tile_x, tile_y, 12)
+            .unwrap_or_else(fallback);
+        doc.x = nx;
+        doc.y = ny;
+        doc.coord_version = PLAYER_COORD_VERSION;
+        let store = app_state.store.clone();
+        let doc_clone = doc.clone();
+        tokio::spawn(async move {
+            let _ = store.save_player(&doc_clone).await;
+        });
+    }
+
     let welcome_msg = {
         let mut state = app_state.state.write().await;
         state
@@ -233,11 +259,30 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String, lang
             .entry(sid.clone())
             .or_insert(InputState::default());
         let lang = player_language(&state, &sid);
+        let (doc_x, doc_y) = player_position_from_doc(&doc);
+        let (tile_x, tile_y) = entity_foot_tile(doc_x, doc_y);
+        let boat_structure = state
+            .structure_tiles
+            .get(&TileCoord { x: tile_x, y: tile_y })
+            .cloned();
         let player = state
             .players
             .entry(sid.clone())
             .or_insert_with(|| Player::from_doc(doc.clone()));
         player.sync_from_doc(&doc);
+        if let Some(structure) = boat_structure {
+            if structure.kind == "boat" {
+                let (bx, by) = tile_anchor_position(structure.x, structure.y);
+                player.x = bx;
+                player.y = by;
+                player.in_boat = true;
+                player.boat_id = Some(structure.id);
+                player.boat_tile = Some(TileCoord {
+                    x: structure.x,
+                    y: structure.y,
+                });
+            }
+        }
         ServerMessage::Welcome {
             player: player.self_view(),
             world: app_state.world.clone(),
@@ -535,8 +580,8 @@ async fn handle_chunk_request(app_state: &AppState, sid: &str, chunks: Vec<Chunk
 
 async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: i32, y: i32) {
     let mut state = app_state.state.write().await;
-    let (player_id, inventory_snapshot) = match state.players.get(sid) {
-        Some(player) => (player.id.clone(), player.inventory.clone()),
+    let (player_id, inventory_snapshot, player_pos) = match state.players.get(sid) {
+        Some(player) => (player.id.clone(), player.inventory.clone(), (player.x, player.y)),
         None => return,
     };
 
@@ -545,6 +590,8 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     let mut cost = Vec::new();
     let mut require_shovel = false;
     let mut requires_land = true;
+    let mut require_water = false;
+    let mut require_near_water = false;
     let lang = player_language(&state, &player_id);
 
     let build_kind = kind.as_str();
@@ -653,6 +700,18 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             tiles.push(coord);
             placements.push((coord, "road".to_string()));
         }
+        "boat" => {
+            cost.push(ItemStack {
+                id: "wood".to_string(),
+                count: 10,
+            });
+            requires_land = false;
+            require_water = true;
+            require_near_water = true;
+            let coord = TileCoord { x, y };
+            tiles.push(coord);
+            placements.push((coord, "boat".to_string()));
+        }
         _ => {
             send_system_message(
                 &mut state,
@@ -702,6 +761,18 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         return;
     }
 
+    if require_near_water {
+        let (px, py) = entity_foot_tile(player_pos.0, player_pos.1);
+        if !is_adjacent_to_water(&app_state.noise, px, py) {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_need_water(lang).to_string(),
+            );
+            return;
+        }
+    }
+
     for tile in &tiles {
         if state
             .structure_tiles
@@ -719,6 +790,14 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                 &mut state,
                 &player_id,
                 message_clear_resource(lang).to_string(),
+            );
+            return;
+        }
+        if require_water && tile_at(&app_state.noise, tile.x, tile.y) != TILE_WATER {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_build_on_water(lang).to_string(),
             );
             return;
         }
@@ -1032,6 +1111,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
             let input = state.inputs.get(&id).cloned().unwrap_or_default();
             if let Some(mut player) = state.players.remove(&id) {
                 let prev_inventory_hash = player.last_inventory_hash;
+                let prev_boat_tile = player.boat_tile;
                 update_player_movement(
                     &mut player,
                     input,
@@ -1039,6 +1119,9 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                     &app_state.noise,
                     dt,
                 );
+                if player.in_boat {
+                    sync_boat_position(&mut player, &mut state, &app_state.world, prev_boat_tile);
+                }
                 handle_player_actions(
                     &mut player,
                     input,
@@ -1267,11 +1350,32 @@ fn update_player_movement(
     let next_x = player.x + dx * PLAYER_SPEED * dt;
     let next_y = player.y + dy * PLAYER_SPEED * dt;
 
-    if can_walk(structure_tiles, noise, next_x, player.y) {
-        player.x = next_x;
-    }
-    if can_walk(structure_tiles, noise, player.x, next_y) {
-        player.y = next_y;
+    if player.in_boat {
+        if can_sail(structure_tiles, noise, next_x, player.y) {
+            player.x = next_x;
+        } else if can_walk(structure_tiles, noise, next_x, player.y) {
+            player.x = next_x;
+            player.in_boat = false;
+            player.boat_id = None;
+            player.boat_tile = None;
+        }
+        if player.in_boat {
+            if can_sail(structure_tiles, noise, player.x, next_y) {
+                player.y = next_y;
+            } else if can_walk(structure_tiles, noise, player.x, next_y) {
+                player.y = next_y;
+                player.in_boat = false;
+                player.boat_id = None;
+                player.boat_tile = None;
+            }
+        }
+    } else {
+        if can_walk(structure_tiles, noise, next_x, player.y) {
+            player.x = next_x;
+        }
+        if can_walk(structure_tiles, noise, player.x, next_y) {
+            player.y = next_y;
+        }
     }
 }
 
@@ -1298,69 +1402,106 @@ fn handle_player_actions(
 ) {
     if input.gather && now_ms - player.last_gather_ms >= 400 {
         let lang = player_language(state, &player.id);
-        let mut messages = Vec::new();
-        let mut resource_update: Option<(ResourceNodePublic, String)> = None;
-        let mut did_gather = false;
-
-        {
-            if let Some((resource, def)) = find_nearby_resource(player, state, data) {
-                did_gather = true;
-                let tool_power = best_tool_power(&player.inventory, data, &def.tool);
-                if let Some(mut power) = tool_power {
-                    if resource.kind == "rock" {
-                        power = (power as f32 / resource.size.max(1) as f32).ceil() as i32;
-                    }
-                    resource.hp -= power;
-                    if resource.hp <= 0 {
-                        resource.hp = 0;
-                        resource.respawn_at_ms = Some(now_ms + def.respawn_ms);
-                        let yield_multiplier = resource.size.max(1);
-                        for drop in &def.drops {
-                            let count = drop.count * yield_multiplier;
-                            add_item(&mut player.inventory, &drop.id, count);
-                            let item_name =
-                                localize_item_name(data, &drop.id, lang);
-                            messages.push(message_collected(&item_name, count, lang));
-                        }
-                        resource_update = Some((
-                            ResourceNodePublic::from(resource.clone()),
-                            "removed".to_string(),
-                        ));
-                    } else {
-                        let resource_name =
-                            localize_resource_name(data, &resource.kind, lang);
-                        messages.push(message_hit_resource(&resource_name, resource.hp, lang));
-                    }
+        if player.in_boat {
+            player.last_gather_ms = now_ms;
+            if player
+                .inventory
+                .get("fishing_rod")
+                .copied()
+                .unwrap_or(0)
+                <= 0
+            {
+                send_system_message(
+                    state,
+                    &player.id,
+                    message_need_fishing_rod(lang).to_string(),
+                );
+            } else {
+                if player.fishing_target <= 0 {
+                    player.fishing_target = rand::thread_rng().gen_range(FISH_MIN_CLICKS..=FISH_MAX_CLICKS);
+                    player.fishing_clicks = 0;
+                }
+                player.fishing_clicks += 1;
+                if player.fishing_clicks >= player.fishing_target {
+                    player.fishing_clicks = 0;
+                    player.fishing_target =
+                        rand::thread_rng().gen_range(FISH_MIN_CLICKS..=FISH_MAX_CLICKS);
+                    add_item(&mut player.inventory, "fish", 1);
+                    let item_name = localize_item_name(data, "fish", lang);
+                    send_system_message(
+                        state,
+                        &player.id,
+                        message_fishing_catch(&item_name, lang),
+                    );
                 } else {
-                    let tool_name = localize_tool_name(&def.tool, lang);
-                    messages.push(message_need_tool(&tool_name, lang));
+                    send_system_message(state, &player.id, message_fishing_wait(lang).to_string());
                 }
             }
-        }
+        } else {
+            let mut messages = Vec::new();
+            let mut resource_update: Option<(ResourceNodePublic, String)> = None;
+            let mut did_gather = false;
 
-        if did_gather {
-            player.last_gather_ms = now_ms;
-        }
-        for text in messages {
-            send_system_message(state, &player.id, text);
-        }
-        if let Some((resource, state_label)) = resource_update {
-            let chunk = chunk_coord_for_tile(resource.x, resource.y, world.chunk_size);
-            if let Some(sender) = state.clients.get(&player.id) {
-                let _ = sender.send(ServerMessage::ResourceUpdate {
-                    resource: resource.clone(),
-                    state: state_label.clone(),
-                });
+            {
+                if let Some((resource, def)) = find_nearby_resource(player, state, data) {
+                    did_gather = true;
+                    let tool_power = best_tool_power(&player.inventory, data, &def.tool);
+                    if let Some(mut power) = tool_power {
+                        if resource.kind == "rock" {
+                            power = (power as f32 / resource.size.max(1) as f32).ceil() as i32;
+                        }
+                        resource.hp -= power;
+                        if resource.hp <= 0 {
+                            resource.hp = 0;
+                            resource.respawn_at_ms = Some(now_ms + def.respawn_ms);
+                            let yield_multiplier = resource.size.max(1);
+                            for drop in &def.drops {
+                                let count = drop.count * yield_multiplier;
+                                add_item(&mut player.inventory, &drop.id, count);
+                                let item_name =
+                                    localize_item_name(data, &drop.id, lang);
+                                messages.push(message_collected(&item_name, count, lang));
+                            }
+                            resource_update = Some((
+                                ResourceNodePublic::from(resource.clone()),
+                                "removed".to_string(),
+                            ));
+                        } else {
+                            let resource_name =
+                                localize_resource_name(data, &resource.kind, lang);
+                            messages.push(message_hit_resource(&resource_name, resource.hp, lang));
+                        }
+                    } else {
+                        let tool_name = localize_tool_name(&def.tool, lang);
+                        messages.push(message_need_tool(&tool_name, lang));
+                    }
+                }
             }
-            send_to_players_in_chunk(
-                state,
-                world.chunk_size,
-                chunk,
-                ServerMessage::ResourceUpdate {
-                    resource,
-                    state: state_label,
-                },
-            );
+
+            if did_gather {
+                player.last_gather_ms = now_ms;
+            }
+            for text in messages {
+                send_system_message(state, &player.id, text);
+            }
+            if let Some((resource, state_label)) = resource_update {
+                let chunk = chunk_coord_for_tile(resource.x, resource.y, world.chunk_size);
+                if let Some(sender) = state.clients.get(&player.id) {
+                    let _ = sender.send(ServerMessage::ResourceUpdate {
+                        resource: resource.clone(),
+                        state: state_label.clone(),
+                    });
+                }
+                send_to_players_in_chunk(
+                    state,
+                    world.chunk_size,
+                    chunk,
+                    ServerMessage::ResourceUpdate {
+                        resource,
+                        state: state_label,
+                    },
+                );
+            }
         }
     }
 
@@ -1379,7 +1520,44 @@ fn handle_player_actions(
     }
 
     if input.interact && now_ms - player.last_interact_ms >= 500 {
-        if let Some(npc) = find_nearby_npc(player, data) {
+        if !player.in_boat {
+            if let Some(boat) = find_nearby_boat(player, state) {
+                if state.players.values().any(|other| {
+                    other.in_boat && other.boat_id == Some(boat.id) && other.id != player.id
+                }) {
+                    let lang = player_language(state, &player.id);
+                    send_system_message(
+                        state,
+                        &player.id,
+                        message_boat_occupied(lang).to_string(),
+                    );
+                } else {
+                    let (bx, by) = tile_anchor_position(boat.x, boat.y);
+                    player.x = bx;
+                    player.y = by;
+                    player.in_boat = true;
+                    player.boat_id = Some(boat.id);
+                    player.boat_tile = Some(TileCoord { x: boat.x, y: boat.y });
+                    let lang = player_language(state, &player.id);
+                    send_system_message(
+                        state,
+                        &player.id,
+                        message_board_boat(lang).to_string(),
+                    );
+                    if let Some(sender) = state.clients.get(&player.id) {
+                        let _ = sender.send(ServerMessage::EntitiesUpdate {
+                            players: vec![PlayerPublic::from(&*player)],
+                            monsters: Vec::new(),
+                            projectiles: Vec::new(),
+                        });
+                    }
+                }
+                player.last_interact_ms = now_ms;
+            } else if let Some(npc) = find_nearby_npc(player, data) {
+                handle_npc_interaction(player, npc, state, data);
+                player.last_interact_ms = now_ms;
+            }
+        } else if let Some(npc) = find_nearby_npc(player, data) {
             handle_npc_interaction(player, npc, state, data);
             player.last_interact_ms = now_ms;
         }
@@ -1393,6 +1571,97 @@ fn handle_player_actions(
         let lang = player_language(state, &player.id);
         send_system_message(state, &player.id, message_wake_up(lang).to_string());
     }
+}
+
+fn sync_boat_position(
+    player: &mut Player,
+    state: &mut GameState,
+    world: &WorldConfig,
+    prev_boat_tile: Option<TileCoord>,
+) {
+    let boat_id = match player.boat_id {
+        Some(id) => id,
+        None => return,
+    };
+    let (tile_x, tile_y) = entity_foot_tile(player.x, player.y);
+    let new_tile = TileCoord {
+        x: tile_x,
+        y: tile_y,
+    };
+    let mut old_tile = prev_boat_tile.unwrap_or(new_tile);
+    if old_tile == new_tile {
+        player.boat_tile = Some(new_tile);
+        return;
+    }
+
+    let mut boat = None;
+    if let Some(structure) = state.structure_tiles.get(&old_tile) {
+        if structure.id == boat_id && structure.kind == "boat" {
+            boat = Some(structure.clone());
+        }
+    }
+    if boat.is_none() {
+        if let Some((coord, structure)) = state
+            .structure_tiles
+            .iter()
+            .find(|(_, structure)| structure.id == boat_id && structure.kind == "boat")
+        {
+            old_tile = *coord;
+            boat = Some(structure.clone());
+        }
+    }
+    let Some(mut boat) = boat else {
+        player.boat_tile = Some(new_tile);
+        return;
+    };
+
+    if old_tile == new_tile {
+        player.boat_tile = Some(new_tile);
+        return;
+    }
+
+    state.structure_tiles.remove(&old_tile);
+    boat.x = new_tile.x;
+    boat.y = new_tile.y;
+    state.structure_tiles.insert(new_tile, boat.clone());
+    player.boat_tile = Some(new_tile);
+
+    let removed = StructurePublic {
+        id: boat.id,
+        kind: boat.kind.clone(),
+        x: old_tile.x,
+        y: old_tile.y,
+    };
+    let added = StructurePublic {
+        id: boat.id,
+        kind: boat.kind.clone(),
+        x: new_tile.x,
+        y: new_tile.y,
+    };
+    let old_chunk = chunk_coord_for_tile(old_tile.x, old_tile.y, world.chunk_size);
+    let new_chunk = chunk_coord_for_tile(new_tile.x, new_tile.y, world.chunk_size);
+    let mut chunks = HashSet::new();
+    chunks.insert(old_chunk);
+    chunks.insert(new_chunk);
+
+    send_to_players_in_chunks(
+        state,
+        world.chunk_size,
+        &chunks,
+        ServerMessage::StructureUpdate {
+            structures: vec![removed],
+            state: "removed".to_string(),
+        },
+    );
+    send_to_players_in_chunks(
+        state,
+        world.chunk_size,
+        &chunks,
+        ServerMessage::StructureUpdate {
+            structures: vec![added],
+            state: "added".to_string(),
+        },
+    );
 }
 
 fn update_monsters(
@@ -1895,6 +2164,19 @@ fn find_nearby_npc<'a>(player: &Player, data: &'a GameData) -> Option<&'a NpcDef
     None
 }
 
+fn find_nearby_boat(player: &Player, state: &GameState) -> Option<StructureTile> {
+    for structure in state.structure_tiles.values() {
+        if structure.kind != "boat" {
+            continue;
+        }
+        let (bx, by) = tile_anchor_position(structure.x, structure.y);
+        if distance(player.x, player.y, bx, by) <= INTERACT_RANGE {
+            return Some(structure.clone());
+        }
+    }
+    None
+}
+
 fn best_tool_power(
     inventory: &HashMap<String, i32>,
     data: &GameData,
@@ -2054,6 +2336,8 @@ fn localize_item_name(data: &GameData, item_id: &str, lang: Language) -> String 
         "fine_axe" => "Gute Axt",
         "basic_pick" => "Einfache Spitzhacke",
         "basic_shovel" => "Schaufel",
+        "fishing_rod" => "Angel",
+        "fish" => "Fisch",
         "rusty_sword" => "Rostiges Schwert",
         "iron_sword" => "Eisenschwert",
         "bow" => "Bogen",
@@ -2129,6 +2413,7 @@ fn localize_npc_name(npc: &NpcDef, lang: Language) -> String {
     let localized = match npc.id.as_str() {
         "npc_logger" => "Edda die Holzfällerin",
         "npc_hunter" => "Bram der Jäger",
+        "npc_jan" => "Jan der Angler",
         _ => return npc.name.clone(),
     };
     localized.to_string()
@@ -2141,6 +2426,7 @@ fn localize_npc_dialog(npc: &NpcDef, lang: Language) -> String {
     let localized = match npc.id.as_str() {
         "npc_logger" => "Pfadwege halten uns in Bewegung. Bring mir Holz und Stein, dann baue ich eine Schaufel.",
         "npc_hunter" => "Wildschweine streifen durchs Dickicht. Bring mir ihre Keulen.",
+        "npc_jan" => "Ich wollte mal Forellen mit der Pfanne jagen. Seitdem rede ich lieber mit Fischen. Bring mir 20 Kaninchenkeulen, dann bekommst du meine Angel.",
         _ => return npc.dialog.clone(),
     };
     localized.to_string()
@@ -2154,6 +2440,7 @@ fn localize_quest_name(quest: &QuestDef, lang: Language) -> String {
         "quest_lumber" => "Holz für das Lager",
         "quest_shovel" => "Pfadbereiter",
         "quest_hunter" => "Wildschweinkeulen",
+        "quest_fishing" => "Jans Angel",
         _ => return quest.name.clone(),
     };
     localized.to_string()
@@ -2167,6 +2454,7 @@ fn localize_quest_description(quest: &QuestDef, lang: Language) -> String {
         "quest_lumber" => "Bring 5 Holz zu Edda.",
         "quest_shovel" => "Bring 6 Holz und 4 Stein, damit Edda eine Schaufel bauen kann.",
         "quest_hunter" => "Bring 3 Wildschweinkeulen zu Bram.",
+        "quest_fishing" => "Bring 20 Kaninchenkeulen zu Jan.",
         _ => return quest.description.clone(),
     };
     localized.to_string()
@@ -2181,6 +2469,7 @@ fn message_build_success(lang: Language, kind: &str) -> String {
             "bridge_stone" => "Du baust eine Steinbrücke.".to_string(),
             "path" => "Du legst einen Pfad an.".to_string(),
             "road" => "Du baust eine Straße.".to_string(),
+            "boat" => "Du baust ein Boot.".to_string(),
             _ => "Unbekannte Bauoption.".to_string(),
         },
         Language::En => match kind {
@@ -2190,6 +2479,7 @@ fn message_build_success(lang: Language, kind: &str) -> String {
             "bridge_stone" => "You build a stone bridge.".to_string(),
             "path" => "You lay down a path.".to_string(),
             "road" => "You build a road.".to_string(),
+            "boat" => "You build a boat.".to_string(),
             _ => "Unknown build option.".to_string(),
         },
     }
@@ -2239,10 +2529,59 @@ fn message_build_on_land(lang: Language) -> &'static str {
     }
 }
 
+fn message_build_on_water(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Das kannst du nur auf dem Wasser bauen.",
+        Language::En => "You can only build that on water.",
+    }
+}
+
+fn message_need_water(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du musst am Wasser stehen, um ein Boot zu bauen.",
+        Language::En => "You need to stand by water to build a boat.",
+    }
+}
+
 fn message_unknown_build(lang: Language) -> &'static str {
     match lang {
         Language::De => "Unbekannte Bauoption.",
         Language::En => "Unknown build option.",
+    }
+}
+
+fn message_need_fishing_rod(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du brauchst eine Angel, um zu fischen.",
+        Language::En => "You need a fishing rod to fish.",
+    }
+}
+
+fn message_fishing_wait(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Noch kein Biss.",
+        Language::En => "Nothing bites yet.",
+    }
+}
+
+fn message_fishing_catch(item_name: &str, lang: Language) -> String {
+    match lang {
+        Language::De => format!("Du ziehst einen {} aus dem Wasser.", item_name),
+        Language::En => format!("You reel in a {}.", item_name),
+    }
+}
+
+fn message_board_boat(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Du steigst ins Boot.",
+        Language::En => "You climb into the boat.",
+    }
+}
+
+fn message_boat_occupied(lang: Language) -> &'static str {
+    match lang {
+        Language::De => "Dieses Boot ist bereits besetzt.",
+        Language::En => "That boat is already occupied.",
     }
 }
 
@@ -2635,6 +2974,31 @@ fn can_walk(
     tile_at(noise, tile_x, tile_y) != TILE_WATER
 }
 
+fn can_sail(
+    structure_tiles: &HashMap<TileCoord, StructureTile>,
+    noise: &WorldNoise,
+    x: f32,
+    y: f32,
+) -> bool {
+    let (tile_x, tile_y) = entity_foot_tile(x, y);
+    if tile_at(noise, tile_x, tile_y) != TILE_WATER {
+        return false;
+    }
+    if let Some(structure) = structure_tiles.get(&TileCoord { x: tile_x, y: tile_y }) {
+        if structure.kind.starts_with("bridge_") {
+            return false;
+        }
+        if matches!(
+            structure.kind.as_str(),
+            "hut_wood" | "hut_wood_root" | "hut_wood_block" | "house_stone" | "house_stone_root"
+                | "house_stone_block"
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
 fn generate_tiles(coord: ChunkCoord, world: &WorldConfig, noise: &WorldNoise) -> Vec<u8> {
     let chunk_size = world.chunk_size;
     let mut tiles = Vec::with_capacity((chunk_size * chunk_size) as usize);
@@ -2872,6 +3236,41 @@ fn tile_at(noise: &WorldNoise, x: i32, y: i32) -> u8 {
             TILE_GRASS
         }
     }
+}
+
+fn is_adjacent_to_water(noise: &WorldNoise, x: i32, y: i32) -> bool {
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        if tile_at(noise, x + dx, y + dy) == TILE_WATER {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_nearest_land_anchor(
+    noise: &WorldNoise,
+    start_x: i32,
+    start_y: i32,
+    max_radius: i32,
+) -> Option<(f32, f32)> {
+    if tile_at(noise, start_x, start_y) != TILE_WATER {
+        return Some(tile_anchor_position(start_x, start_y));
+    }
+    for radius in 1..=max_radius {
+        for dx in -radius..=radius {
+            for dy in -radius..=radius {
+                if dx.abs() != radius && dy.abs() != radius {
+                    continue;
+                }
+                let x = start_x + dx;
+                let y = start_y + dy;
+                if tile_at(noise, x, y) != TILE_WATER {
+                    return Some(tile_anchor_position(x, y));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn noise_hash01(seed: u64, x: i32, y: i32) -> f32 {
@@ -3200,6 +3599,9 @@ struct Player {
     hp: i32,
     face_x: f32,
     face_y: f32,
+    in_boat: bool,
+    boat_id: Option<u64>,
+    boat_tile: Option<TileCoord>,
     inventory: HashMap<String, i32>,
     completed_quests: HashSet<String>,
     last_attack_ms: i64,
@@ -3209,6 +3611,8 @@ struct Player {
     last_saved_ms: i64,
     last_inventory_hash: u64,
     last_input_seq: u32,
+    fishing_clicks: i32,
+    fishing_target: i32,
 }
 
 impl Player {
@@ -3223,6 +3627,9 @@ impl Player {
             hp: doc.hp,
             face_x: 1.0,
             face_y: 0.0,
+            in_boat: false,
+            boat_id: None,
+            boat_tile: None,
             inventory: doc.inventory,
             completed_quests: doc.completed_quests.into_iter().collect(),
             last_attack_ms: 0,
@@ -3232,6 +3639,8 @@ impl Player {
             last_saved_ms: now_millis(),
             last_inventory_hash: inventory_hash,
             last_input_seq: 0,
+            fishing_clicks: 0,
+            fishing_target: 0,
         }
     }
 
@@ -3241,6 +3650,11 @@ impl Player {
         self.x = x;
         self.y = y;
         self.hp = doc.hp;
+        self.in_boat = false;
+        self.boat_id = None;
+        self.boat_tile = None;
+        self.fishing_clicks = 0;
+        self.fishing_target = 0;
         self.inventory = doc.inventory.clone();
         self.completed_quests = doc.completed_quests.iter().cloned().collect();
         self.last_inventory_hash = inventory_hash(&self.inventory);
@@ -3267,6 +3681,7 @@ impl Player {
             x: self.x,
             y: self.y,
             hp: self.hp,
+            in_boat: self.in_boat,
             inventory: self.inventory.clone(),
         }
     }
@@ -3606,6 +4021,7 @@ struct PlayerPublic {
     x: f32,
     y: f32,
     hp: i32,
+    in_boat: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_input_seq: Option<u32>,
 }
@@ -3618,6 +4034,7 @@ impl From<&Player> for PlayerPublic {
             x: player.x,
             y: player.y,
             hp: player.hp,
+            in_boat: player.in_boat,
             last_input_seq: None,
         }
     }
@@ -3631,6 +4048,7 @@ struct PlayerSelf {
     x: f32,
     y: f32,
     hp: i32,
+    in_boat: bool,
     inventory: HashMap<String, i32>,
 }
 

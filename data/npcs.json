@@ -12,5 +12,12 @@
     "x": 15.0,
     "y": 6.0,
     "dialog": "Wild boar roam the thickets. Bring me their legs."
+  },
+  {
+    "id": "npc_jan",
+    "name": "Jan the Angler",
+    "x": 6.0,
+    "y": 12.0,
+    "dialog": "I once tried to catch trout with a frying pan. Bring me 20 rabbit legs and I'll hand over my fishing rod."
   }
 ]

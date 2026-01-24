@@ -36,5 +36,17 @@
       { "id": "bow", "count": 1 },
       { "id": "arrow", "count": 12 }
     ]
+  },
+  {
+    "id": "quest_fishing",
+    "npc_id": "npc_jan",
+    "name": "Jan's Fishing Rod",
+    "description": "Bring 20 rabbit legs to Jan.",
+    "requires": [
+      { "id": "rabbit_leg", "count": 20 }
+    ],
+    "rewards": [
+      { "id": "fishing_rod", "count": 1 }
+    ]
   }
 ]

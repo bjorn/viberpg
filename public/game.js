@@ -62,6 +62,7 @@
       buildOptionBridgeStone: 'Stone Bridge (20 stone)',
       buildOptionPath: 'Path (shovel)',
       buildOptionRoad: 'Road (2 stone + shovel)',
+      buildOptionBoat: 'Boat (10 wood)',
       buildOptionDemolish: 'Demolish',
       actionAttack: 'Attack',
       actionGather: 'Gather',
@@ -105,6 +106,7 @@
       buildOptionBridgeStone: 'Steinbrücke (20 Stein)',
       buildOptionPath: 'Pfad (Schaufel)',
       buildOptionRoad: 'Straße (2 Stein + Schaufel)',
+      buildOptionBoat: 'Boot (10 Holz)',
       buildOptionDemolish: 'Abriss',
       actionAttack: 'Angriff',
       actionGather: 'Sammeln',
@@ -131,6 +133,7 @@
   let chunkSize = 32;
   let playerId = null;
   let playerState = null;
+  let localInBoat = false;
   let worldSeed = 0;
   const PLAYER_ANCHOR = { x: 0.5, y: 0.9 };
   const RESOURCE_ANCHOR = { x: 0.5, y: 1.0 };
@@ -188,6 +191,7 @@
     'assets/entities/bridge-stone.svg',
     'assets/entities/path.svg',
     'assets/entities/road.svg',
+    'assets/entities/boat.svg',
     'assets/entities/tent.svg',
     'assets/entities/campfire.svg',
     'assets/entities/player.svg',
@@ -216,6 +220,9 @@
   const npcSprites = new Map();
   const landmarkSprites = new Map();
   const typingIndicators = new Map();
+  let localBoatSprite = null;
+  let localBoatStructureId = null;
+  let localBoatLastWaterTile = null;
   const treeKinds = new Set(['tree', 'apple_tree', 'pine_tree', 'palm_tree']);
   function resourceTextureFor(kind, size = 1) {
     const level = Math.max(1, Math.min(3, size || 1));
@@ -404,6 +411,7 @@
       bridge_stone: t('buildOptionBridgeStone'),
       path: t('buildOptionPath'),
       road: t('buildOptionRoad'),
+      boat: t('buildOptionBoat'),
       demolish: t('buildOptionDemolish'),
     };
     buildButtons.forEach((button) => {
@@ -1107,7 +1115,10 @@
     }
     const tileId = getTileIdAt(tileX, tileY);
     if (tileId == null) return true;
-    return tileId !== TILE_WATER;
+    if (tileId === TILE_WATER) {
+      return localInBoat;
+    }
+    return true;
   }
 
   function upsertResource(resource) {
@@ -1227,9 +1238,22 @@
         sprite.anchor.set(0.5, 0.9);
         entityLayer.addChild(sprite);
       }
-      entry = { sprite, isGround, isBridge };
+      entry = {
+        sprite,
+        isGround,
+        isBridge,
+        id: structure.id,
+        kind: structure.kind,
+        tileX: structure.x,
+        tileY: structure.y,
+      };
       structureSprites.set(key, entry);
     }
+    entry.id = structure.id;
+    entry.kind = structure.kind;
+    entry.tileX = structure.x;
+    entry.tileY = structure.y;
+    entry.sprite.scale.set(1, 1);
     const footprint =
       structureFootprints.get(structure.kind) || structureFootprints.get(baseKind);
     if (entry.isGround || footprint) {
@@ -1276,6 +1300,140 @@
     structureSprites.delete(key);
   }
 
+  function findLocalBoatStructure(px, py) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const entry of structureSprites.values()) {
+      if (entry.kind !== 'boat') continue;
+      const dx = entry.tileX + 0.5 - px;
+      const dy = entry.tileY + 0.5 - py;
+      const dist = Math.hypot(dx, dy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = entry;
+      }
+    }
+    if (best && bestDist <= INTERACT_RANGE + 0.25) {
+      return best;
+    }
+    return null;
+  }
+
+  function updateBoatStructureVisibility() {
+    for (const entry of structureSprites.values()) {
+      if (entry.kind !== 'boat') continue;
+      if (localInBoat && entry.id === localBoatStructureId) {
+        entry.sprite.visible = false;
+      } else {
+        entry.sprite.visible = true;
+      }
+    }
+  }
+
+  function updateLocalBoatSprite(localEntity) {
+    if (!localEntity || !localInBoat) {
+      if (localBoatSprite) {
+        if (localBoatSprite.parent) {
+          localBoatSprite.parent.removeChild(localBoatSprite);
+        }
+        localBoatSprite.destroy();
+        localBoatSprite = null;
+      }
+      return;
+    }
+    if (!localBoatSprite) {
+      const texture = textures?.boat;
+      if (!texture) return;
+      localBoatSprite = new PIXI.Sprite(texture);
+      localBoatSprite.anchor.set(0.5, 0.5);
+      entityLayer.addChild(localBoatSprite);
+    }
+    const boatX = localEntity.x + 0.18;
+    const boatY = localEntity.y - 0.2;
+    const basePos = worldToPixels(boatX, boatY);
+    localBoatSprite.x = basePos.x;
+    localBoatSprite.y = basePos.y;
+    localBoatSprite.scale.set(1, 1);
+    localBoatSprite.zIndex = basePos.y + tileSize * 0.35;
+  }
+
+  function finalizeLocalBoatPosition() {
+    if (!localBoatStructureId || !localBoatLastWaterTile) {
+      localBoatStructureId = null;
+      localBoatLastWaterTile = null;
+      return;
+    }
+    const entry = Array.from(structureSprites.values()).find(
+      (item) => item.kind === 'boat' && item.id === localBoatStructureId,
+    );
+    if (!entry) {
+      localBoatStructureId = null;
+      localBoatLastWaterTile = null;
+      return;
+    }
+    const tileX = localBoatLastWaterTile.x;
+    const tileY = localBoatLastWaterTile.y;
+    if (entry.tileX !== tileX || entry.tileY !== tileY) {
+      structureTiles.delete(tileKey(entry.tileX, entry.tileY));
+      structureTiles.set(tileKey(tileX, tileY), 'boat');
+      const oldKey = `${entry.id}:${entry.tileX}:${entry.tileY}`;
+      const newKey = `${entry.id}:${tileX}:${tileY}`;
+      if (oldKey !== newKey) {
+        structureSprites.delete(oldKey);
+        structureSprites.set(newKey, entry);
+      }
+      entry.tileX = tileX;
+      entry.tileY = tileY;
+    }
+    const basePos = tileToPixels(tileX, tileY, { x: 0.5, y: 0.5 });
+    entry.sprite.x = basePos.x;
+    entry.sprite.y = basePos.y;
+    entry.sprite.zIndex = basePos.y - 1;
+    localBoatStructureId = null;
+    localBoatLastWaterTile = null;
+  }
+
+  function updateLocalBoatStructurePosition(localEntity) {
+    if (!localInBoat || !localEntity) return;
+    if (!localBoatStructureId) {
+      const match = findLocalBoatStructure(localEntity.x, localEntity.y);
+      if (match) {
+        localBoatStructureId = match.id;
+      } else {
+        return;
+      }
+    }
+    const entry = Array.from(structureSprites.values()).find(
+      (item) => item.kind === 'boat' && item.id === localBoatStructureId,
+    );
+    if (!entry) return;
+    const tileX = Math.floor(localEntity.x);
+    const tileY = Math.floor(localEntity.y);
+    const tileId = getTileIdAt(tileX, tileY);
+    if (tileId === TILE_WATER) {
+      localBoatLastWaterTile = { x: tileX, y: tileY };
+    }
+    const target =
+      localBoatLastWaterTile || (tileId === TILE_WATER ? { x: tileX, y: tileY } : null);
+    if (!target) return;
+    if (entry.tileX !== target.x || entry.tileY !== target.y) {
+      structureTiles.delete(tileKey(entry.tileX, entry.tileY));
+      structureTiles.set(tileKey(target.x, target.y), 'boat');
+      const oldKey = `${entry.id}:${entry.tileX}:${entry.tileY}`;
+      const newKey = `${entry.id}:${target.x}:${target.y}`;
+      if (oldKey !== newKey) {
+        structureSprites.delete(oldKey);
+        structureSprites.set(newKey, entry);
+      }
+      entry.tileX = target.x;
+      entry.tileY = target.y;
+    }
+    const basePos = tileToPixels(entry.tileX, entry.tileY, { x: 0.5, y: 0.5 });
+    entry.sprite.x = basePos.x;
+    entry.sprite.y = basePos.y;
+    entry.sprite.zIndex = basePos.y - 1;
+  }
+
   function syncStructures(structures) {
     if (!structures) return;
     structures.forEach((structure) => upsertStructure(structure));
@@ -1296,14 +1454,31 @@
         entity = createEntityState(sprite, player.x, player.y, now, {
           facing: 'down',
           isAlt,
+          inBoat: Boolean(player.in_boat),
         });
         playerEntities.set(player.id, entity);
       }
       if (player.id === playerId) {
+        const prevInBoat = localInBoat;
         playerState = player;
+        localInBoat = Boolean(player.in_boat);
+        entity.inBoat = localInBoat;
+        if (prevInBoat && !localInBoat) {
+          finalizeLocalBoatPosition();
+        }
+        if (!localInBoat) {
+          localBoatStructureId = null;
+          localBoatLastWaterTile = null;
+        }
         syncLocalName(player.name);
         if (!localPrediction) {
           localPrediction = { x: player.x, y: player.y };
+        }
+        if (prevInBoat !== localInBoat && localPrediction) {
+          localPrediction.x = player.x;
+          localPrediction.y = player.y;
+          localRenderOffset.x = 0;
+          localRenderOffset.y = 0;
         }
         if (player.last_input_seq != null) {
           reconcileLocalPlayer(entity, player, now);
@@ -1312,6 +1487,7 @@
           localPrediction.y = player.y;
         }
       } else if (entity) {
+        entity.inBoat = Boolean(player.in_boat);
         updateEntityTarget(entity, player.x, player.y, now);
       }
       ensurePlayerLabel(entity, player.name);
@@ -1545,6 +1721,7 @@
     textures.bridge_stone = PIXI.Texture.from('assets/entities/bridge-stone.svg');
     textures.path = PIXI.Texture.from('assets/entities/path.svg');
     textures.road = PIXI.Texture.from('assets/entities/road.svg');
+    textures.boat = PIXI.Texture.from('assets/entities/boat.svg');
     textures.tent = PIXI.Texture.from('assets/entities/tent.svg');
     textures.campfire = PIXI.Texture.from('assets/entities/campfire.svg');
     textures.playerFront = PIXI.Texture.from('assets/entities/player.svg');
@@ -1602,6 +1779,7 @@
       hp: null,
       facing: options.facing ?? 'down',
       isAlt: options.isAlt ?? false,
+      inBoat: options.inBoat ?? false,
       walkOffset: Math.random() * Math.PI * 2,
       label: options.label ?? null,
       name: options.name ?? null,
@@ -1815,6 +1993,12 @@
         break;
       }
     }
+    if (!canGather) {
+      const tileId = getTileIdAt(Math.floor(px), Math.floor(py));
+      if (tileId === TILE_WATER) {
+        canGather = true;
+      }
+    }
 
     let canInteract = false;
     for (const entry of npcSprites.values()) {
@@ -1823,6 +2007,19 @@
       if (Math.hypot(dx, dy) <= INTERACT_RANGE) {
         canInteract = true;
         break;
+      }
+    }
+    if (!canInteract) {
+      for (const [key, kind] of structureTiles.entries()) {
+        if (kind !== 'boat') continue;
+        const [tx, ty] = key.split(',').map(Number);
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+        const dx = tx + 0.5 - px;
+        const dy = ty + 0.5 - py;
+        if (Math.hypot(dx, dy) <= INTERACT_RANGE) {
+          canInteract = true;
+          break;
+        }
       }
     }
 
@@ -1845,7 +2042,9 @@
         entity.y = renderY;
         const dx = entity.x - prevX;
         const dy = entity.y - prevY;
-        if (dx !== 0 || dy !== 0) {
+        if (entity.inBoat) {
+          entity.facing = 'down';
+        } else if (dx !== 0 || dy !== 0) {
           entity.facing = getFacingFromDelta(dx, dy, entity.facing);
         }
         applyPlayerFacing(entity);
@@ -1853,8 +2052,17 @@
         entity.sprite.x = basePos.x;
         const baseY = basePos.y;
         const moveDistance = Math.hypot(dx, dy);
-        applyWalkAnimation(entity, now, baseY, moveDistance);
-        entity.sprite.zIndex = baseY;
+        if (entity.inBoat) {
+          entity.sprite.rotation = 0;
+          entity.sprite.skew.x = 0;
+          entity.sprite.scale.x = 1;
+          entity.sprite.scale.y = 1;
+          entity.sprite.y = baseY;
+          entity.sprite.zIndex = baseY - tileSize * 0.25;
+        } else {
+          applyWalkAnimation(entity, now, baseY, moveDistance);
+          entity.sprite.zIndex = baseY;
+        }
         if (entity.label) {
           entity.label.x = basePos.x;
           entity.label.y = baseY + tileSize * 0.2;
@@ -1865,18 +2073,34 @@
       const t = alpha(entity.startTime);
       entity.x = lerp(entity.startX, entity.targetX, t);
       entity.y = lerp(entity.startY, entity.targetY, t);
+      if (entity.inBoat) {
+        entity.facing = 'down';
+      }
       applyPlayerFacing(entity);
       const basePos = worldToPixels(entity.x, entity.y);
       entity.sprite.x = basePos.x;
       const baseY = basePos.y;
-      applyWalkAnimation(entity, now, baseY);
-      entity.sprite.zIndex = baseY;
+      if (entity.inBoat) {
+        entity.sprite.rotation = 0;
+        entity.sprite.skew.x = 0;
+        entity.sprite.scale.x = 1;
+        entity.sprite.scale.y = 1;
+        entity.sprite.y = baseY;
+        entity.sprite.zIndex = baseY - tileSize * 0.25;
+      } else {
+        applyWalkAnimation(entity, now, baseY);
+        entity.sprite.zIndex = baseY;
+      }
       if (entity.label) {
         entity.label.x = basePos.x;
         entity.label.y = baseY + tileSize * 0.2;
         entity.label.zIndex = baseY + tileSize * 0.2;
       }
     }
+
+    updateLocalBoatSprite(localEntity);
+    updateLocalBoatStructurePosition(localEntity);
+    updateBoatStructureVisibility();
 
     for (const entity of monsterEntities.values()) {
       const t = alpha(entity.startTime);
@@ -1916,6 +2140,9 @@
         case 'welcome': {
           playerId = msg.player.id;
           playerState = msg.player;
+          localInBoat = Boolean(msg.player.in_boat);
+          localBoatStructureId = null;
+          localBoatLastWaterTile = null;
           localPrediction = { x: msg.player.x, y: msg.player.y };
           pendingInputs.length = 0;
           inputSeq = 0;

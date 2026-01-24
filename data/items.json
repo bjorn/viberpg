@@ -48,6 +48,16 @@
     "ammo_for": null
   },
   {
+    "id": "fish",
+    "name": "Fish",
+    "kind": "food",
+    "tool": null,
+    "power": null,
+    "heal": 5,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
     "id": "slime_core",
     "name": "Slime Core",
     "kind": "resource",
@@ -97,6 +107,15 @@
     "name": "Shovel",
     "kind": "tool",
     "tool": "shovel",
+    "power": 1,
+    "weapon": null,
+    "ammo_for": null
+  },
+  {
+    "id": "fishing_rod",
+    "name": "Fishing Rod",
+    "kind": "tool",
+    "tool": "fishing",
     "power": 1,
     "weapon": null,
     "ammo_for": null
