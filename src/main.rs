@@ -3688,6 +3688,7 @@ impl Player {
             y: self.y,
             hp: self.hp,
             in_boat: self.in_boat,
+            boat_id: self.boat_id,
             inventory: self.inventory.clone(),
         }
     }
@@ -4028,6 +4029,7 @@ struct PlayerPublic {
     y: f32,
     hp: i32,
     in_boat: bool,
+    boat_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_input_seq: Option<u32>,
 }
@@ -4041,6 +4043,7 @@ impl From<&Player> for PlayerPublic {
             y: player.y,
             hp: player.hp,
             in_boat: player.in_boat,
+            boat_id: player.boat_id,
             last_input_seq: None,
         }
     }
@@ -4055,6 +4058,7 @@ struct PlayerSelf {
     y: f32,
     hp: i32,
     in_boat: bool,
+    boat_id: Option<u64>,
     inventory: HashMap<String, i32>,
 }
 

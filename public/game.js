@@ -222,9 +222,6 @@
   const npcSprites = new Map();
   const landmarkSprites = new Map();
   const typingIndicators = new Map();
-  let localBoatSprite = null;
-  let localBoatStructureId = null;
-  let localBoatLastWaterTile = null;
   const treeKinds = new Set(['tree', 'apple_tree', 'pine_tree', 'palm_tree']);
   function resourceTextureFor(kind, size = 1) {
     const level = Math.max(1, Math.min(3, size || 1));
@@ -1405,6 +1402,9 @@
         tileX: structure.x,
         tileY: structure.y,
       };
+      if (structure.kind === 'boat') {
+        entry.sprite.anchor.set(0.5, 0.5);
+      }
       structureSprites.set(key, entry);
     }
     entry.id = structure.id;
@@ -1458,138 +1458,13 @@
     structureSprites.delete(key);
   }
 
-  function findLocalBoatStructure(px, py) {
-    let best = null;
-    let bestDist = Infinity;
+  function findBoatStructureById(boatId) {
     for (const entry of structureSprites.values()) {
-      if (entry.kind !== 'boat') continue;
-      const dx = entry.tileX + 0.5 - px;
-      const dy = entry.tileY + 0.5 - py;
-      const dist = Math.hypot(dx, dy);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = entry;
+      if (entry.kind === 'boat' && entry.id === boatId) {
+        return entry;
       }
-    }
-    if (best && bestDist <= INTERACT_RANGE + 0.25) {
-      return best;
     }
     return null;
-  }
-
-  function updateBoatStructureVisibility() {
-    for (const entry of structureSprites.values()) {
-      if (entry.kind !== 'boat') continue;
-      if (localInBoat && entry.id === localBoatStructureId) {
-        entry.sprite.visible = false;
-      } else {
-        entry.sprite.visible = true;
-      }
-    }
-  }
-
-  function updateLocalBoatSprite(localEntity) {
-    if (!localEntity || !localInBoat) {
-      if (localBoatSprite) {
-        if (localBoatSprite.parent) {
-          localBoatSprite.parent.removeChild(localBoatSprite);
-        }
-        localBoatSprite.destroy();
-        localBoatSprite = null;
-      }
-      return;
-    }
-    if (!localBoatSprite) {
-      const texture = textures?.boat;
-      if (!texture) return;
-      localBoatSprite = new PIXI.Sprite(texture);
-      localBoatSprite.anchor.set(0.5, 0.5);
-      entityLayer.addChild(localBoatSprite);
-    }
-    const boatX = localEntity.x + 0.18;
-    const boatY = localEntity.y - 0.2;
-    const basePos = worldToPixels(boatX, boatY);
-    localBoatSprite.x = basePos.x;
-    localBoatSprite.y = basePos.y;
-    localBoatSprite.scale.set(1, 1);
-    localBoatSprite.zIndex = basePos.y + tileSize * 0.35;
-  }
-
-  function finalizeLocalBoatPosition() {
-    if (!localBoatStructureId || !localBoatLastWaterTile) {
-      localBoatStructureId = null;
-      localBoatLastWaterTile = null;
-      return;
-    }
-    const entry = Array.from(structureSprites.values()).find(
-      (item) => item.kind === 'boat' && item.id === localBoatStructureId,
-    );
-    if (!entry) {
-      localBoatStructureId = null;
-      localBoatLastWaterTile = null;
-      return;
-    }
-    const tileX = localBoatLastWaterTile.x;
-    const tileY = localBoatLastWaterTile.y;
-    if (entry.tileX !== tileX || entry.tileY !== tileY) {
-      structureTiles.delete(tileKey(entry.tileX, entry.tileY));
-      structureTiles.set(tileKey(tileX, tileY), 'boat');
-      const oldKey = `${entry.id}:${entry.tileX}:${entry.tileY}`;
-      const newKey = `${entry.id}:${tileX}:${tileY}`;
-      if (oldKey !== newKey) {
-        structureSprites.delete(oldKey);
-        structureSprites.set(newKey, entry);
-      }
-      entry.tileX = tileX;
-      entry.tileY = tileY;
-    }
-    const basePos = tileToPixels(tileX, tileY, { x: 0.5, y: 0.5 });
-    entry.sprite.x = basePos.x;
-    entry.sprite.y = basePos.y;
-    entry.sprite.zIndex = basePos.y - 1;
-    localBoatStructureId = null;
-    localBoatLastWaterTile = null;
-  }
-
-  function updateLocalBoatStructurePosition(localEntity) {
-    if (!localInBoat || !localEntity) return;
-    if (!localBoatStructureId) {
-      const match = findLocalBoatStructure(localEntity.x, localEntity.y);
-      if (match) {
-        localBoatStructureId = match.id;
-      } else {
-        return;
-      }
-    }
-    const entry = Array.from(structureSprites.values()).find(
-      (item) => item.kind === 'boat' && item.id === localBoatStructureId,
-    );
-    if (!entry) return;
-    const tileX = Math.floor(localEntity.x);
-    const tileY = Math.floor(localEntity.y);
-    const tileId = getTileIdAt(tileX, tileY);
-    if (tileId === TILE_WATER) {
-      localBoatLastWaterTile = { x: tileX, y: tileY };
-    }
-    const target =
-      localBoatLastWaterTile || (tileId === TILE_WATER ? { x: tileX, y: tileY } : null);
-    if (!target) return;
-    if (entry.tileX !== target.x || entry.tileY !== target.y) {
-      structureTiles.delete(tileKey(entry.tileX, entry.tileY));
-      structureTiles.set(tileKey(target.x, target.y), 'boat');
-      const oldKey = `${entry.id}:${entry.tileX}:${entry.tileY}`;
-      const newKey = `${entry.id}:${target.x}:${target.y}`;
-      if (oldKey !== newKey) {
-        structureSprites.delete(oldKey);
-        structureSprites.set(newKey, entry);
-      }
-      entry.tileX = target.x;
-      entry.tileY = target.y;
-    }
-    const basePos = tileToPixels(entry.tileX, entry.tileY, { x: 0.5, y: 0.5 });
-    entry.sprite.x = basePos.x;
-    entry.sprite.y = basePos.y;
-    entry.sprite.zIndex = basePos.y - 1;
   }
 
   function syncStructures(structures) {
@@ -1613,6 +1488,7 @@
           facing: 'down',
           isAlt,
           inBoat: Boolean(player.in_boat),
+          boatId: player.boat_id ?? null,
         });
         playerEntities.set(player.id, entity);
       }
@@ -1621,13 +1497,7 @@
         playerState = player;
         localInBoat = Boolean(player.in_boat);
         entity.inBoat = localInBoat;
-        if (prevInBoat && !localInBoat) {
-          finalizeLocalBoatPosition();
-        }
-        if (!localInBoat) {
-          localBoatStructureId = null;
-          localBoatLastWaterTile = null;
-        }
+        entity.boatId = player.boat_id ?? null;
         syncLocalName(player.name);
         if (!localPrediction) {
           localPrediction = { x: player.x, y: player.y };
@@ -1646,6 +1516,7 @@
         }
       } else if (entity) {
         entity.inBoat = Boolean(player.in_boat);
+        entity.boatId = player.boat_id ?? null;
         updateEntityTarget(entity, player.x, player.y, now);
       }
       ensurePlayerLabel(entity, player.name);
@@ -1938,6 +1809,7 @@
       facing: options.facing ?? 'down',
       isAlt: options.isAlt ?? false,
       inBoat: options.inBoat ?? false,
+      boatId: options.boatId ?? null,
       walkOffset: Math.random() * Math.PI * 2,
       label: options.label ?? null,
       name: options.name ?? null,
@@ -2256,9 +2128,21 @@
       }
     }
 
-    updateLocalBoatSprite(localEntity);
-    updateLocalBoatStructurePosition(localEntity);
-    updateBoatStructureVisibility();
+    for (const entity of playerEntities.values()) {
+      if (!entity.inBoat || entity.boatId == null) {
+        continue;
+      }
+      const boatEntry = findBoatStructureById(entity.boatId);
+      if (!boatEntry) {
+        continue;
+      }
+      const boatX = entity.x + 0.18;
+      const boatY = entity.y - 0.2;
+      const basePos = worldToPixels(boatX, boatY);
+      boatEntry.sprite.x = basePos.x;
+      boatEntry.sprite.y = basePos.y;
+      boatEntry.sprite.zIndex = basePos.y + tileSize * 0.35;
+    }
 
     for (const entity of monsterEntities.values()) {
       const t = alpha(entity.startTime);
@@ -2299,8 +2183,6 @@
           playerId = msg.player.id;
           playerState = msg.player;
           localInBoat = Boolean(msg.player.in_boat);
-          localBoatStructureId = null;
-          localBoatLastWaterTile = null;
           localPrediction = { x: msg.player.x, y: msg.player.y };
           pendingInputs.length = 0;
           inputSeq = 0;
