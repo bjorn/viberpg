@@ -219,6 +219,7 @@
   const playerEntities = new Map();
   const monsterEntities = new Map();
   const projectileSprites = new Map();
+  const boatEntities = new Map();
   const npcSprites = new Map();
   const landmarkSprites = new Map();
   const typingIndicators = new Map();
@@ -1449,13 +1450,6 @@
     if (renderlessStructureKinds.has(structure.kind)) {
       return;
     }
-    if (structure.kind === 'boat') {
-      for (const entity of playerEntities.values()) {
-        if (entity.inBoat && entity.boatId === structure.id) {
-          return;
-        }
-      }
-    }
     const entry = structureSprites.get(key);
     if (!entry) return;
     if (entry.sprite.parent) {
@@ -1463,24 +1457,6 @@
     }
     entry.sprite.destroy();
     structureSprites.delete(key);
-  }
-
-  function findBoatStructureById(boatId) {
-    for (const entry of structureSprites.values()) {
-      if (entry.kind === 'boat' && entry.id === boatId) {
-        return entry;
-      }
-    }
-    return null;
-  }
-
-  function isBoatInUse(boatId) {
-    for (const entity of playerEntities.values()) {
-      if (entity.inBoat && entity.boatId === boatId) {
-        return true;
-      }
-    }
-    return false;
   }
 
   function syncStructures(structures) {
@@ -1580,6 +1556,50 @@
         }
       }
     }
+  }
+
+  function syncBoats(boats, clearMissing = true) {
+    const seen = new Set();
+    boats.forEach((boat) => {
+      seen.add(boat.id);
+      let entry = boatEntities.get(boat.id);
+      if (!entry) {
+        const sprite = new PIXI.Sprite(textures.boat);
+        sprite.anchor.set(0.5, 0.5);
+        entityLayer.addChild(sprite);
+        entry = { sprite, x: boat.x, y: boat.y };
+        boatEntities.set(boat.id, entry);
+      }
+      entry.x = boat.x;
+      entry.y = boat.y;
+      const basePos = worldToPixels(boat.x + 0.18, boat.y - 0.2);
+      entry.sprite.x = basePos.x;
+      entry.sprite.y = basePos.y;
+      entry.sprite.zIndex = basePos.y + tileSize * 0.35;
+    });
+    if (clearMissing) {
+      for (const [id, entry] of boatEntities.entries()) {
+        if (!seen.has(id)) {
+          if (entry.sprite.parent) {
+            entry.sprite.parent.removeChild(entry.sprite);
+          }
+          entry.sprite.destroy();
+          boatEntities.delete(id);
+        }
+      }
+    }
+  }
+
+  function removeBoats(ids) {
+    ids.forEach((id) => {
+      const entry = boatEntities.get(id);
+      if (!entry) return;
+      if (entry.sprite.parent) {
+        entry.sprite.parent.removeChild(entry.sprite);
+      }
+      entry.sprite.destroy();
+      boatEntities.delete(id);
+    });
   }
 
   function syncProjectiles(projectiles, clearMissing = true) {
@@ -2056,12 +2076,9 @@
       }
     }
     if (!canInteract) {
-      for (const [key, kind] of structureTiles.entries()) {
-        if (kind !== 'boat') continue;
-        const [tx, ty] = key.split(',').map(Number);
-        if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
-        const dx = tx + 0.5 - px;
-        const dy = ty + 0.5 - py;
+      for (const entry of boatEntities.values()) {
+        const dx = entry.x - px;
+        const dy = entry.y - py;
         if (Math.hypot(dx, dy) <= INTERACT_RANGE) {
           canInteract = true;
           break;
@@ -2148,7 +2165,7 @@
       if (!entity.inBoat || entity.boatId == null) {
         continue;
       }
-      const boatEntry = findBoatStructureById(entity.boatId);
+      const boatEntry = boatEntities.get(entity.boatId);
       if (!boatEntry) {
         continue;
       }
@@ -2230,18 +2247,21 @@
           syncPlayers(msg.players, true);
           syncMonsters(msg.monsters, true);
           syncProjectiles(msg.projectiles, true);
+          syncBoats(msg.boats || [], true);
           break;
         }
         case 'entities_update': {
           syncPlayers(msg.players || [], false);
           syncMonsters(msg.monsters || [], false);
           syncProjectiles(msg.projectiles || [], false);
+          syncBoats(msg.boats || [], false);
           break;
         }
         case 'entities_remove': {
           removePlayers(msg.players || []);
           removeMonsters(msg.monsters || []);
           removeProjectiles(msg.projectiles || []);
+          removeBoats(msg.boats || []);
           break;
         }
         case 'resource_update': {
@@ -2258,17 +2278,11 @@
         case 'structure_update': {
           if (msg.state === 'removed') {
             msg.structures.forEach((structure) => {
-              if (structure.kind === 'boat' && isBoatInUse(structure.id)) {
-                return;
-              }
               removeStructure(structure);
               removeStructureFromChunk(chunkKeyForTile(structure.x, structure.y), structure);
             });
           } else {
             msg.structures.forEach((structure) => {
-              if (structure.kind === 'boat' && isBoatInUse(structure.id)) {
-                return;
-              }
               upsertStructure(structure);
               addStructureToChunk(chunkKeyForTile(structure.x, structure.y), structure);
             });

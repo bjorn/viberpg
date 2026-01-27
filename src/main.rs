@@ -110,9 +110,13 @@ async fn main() -> AppResult<()> {
     let state = Arc::new(RwLock::new(GameState::new()));
     {
         let structures = store.load_structures().await?;
+        let boats = store.load_boats().await?;
         let mut state_guard = state.write().await;
         let mut max_id = 0;
         for doc in structures {
+            if doc.kind == "boat" {
+                continue;
+            }
             let id = doc.id as u64;
             max_id = max_id.max(id);
             let tile = StructureTile {
@@ -125,6 +129,23 @@ async fn main() -> AppResult<()> {
             state_guard
                 .structure_tiles
                 .insert(TileCoord { x: tile.x, y: tile.y }, tile);
+        }
+        for doc in boats {
+            let id = doc.id as u64;
+            max_id = max_id.max(id);
+            state_guard.boats.insert(
+                id,
+                Boat {
+                    id,
+                    x: doc.x,
+                    y: doc.y,
+                    owner_id: doc.owner_id,
+                    last_saved_ms: now_millis(),
+                },
+            );
+        }
+        if max_id >= state_guard.next_entity_id {
+            state_guard.next_entity_id = max_id + 1;
         }
         if max_id >= state_guard.next_structure_id {
             state_guard.next_structure_id = max_id + 1;
@@ -233,10 +254,10 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String, lang
     let needs_land = tile_at(&app_state.noise, tile_x, tile_y) == TILE_WATER
         && {
             let state = app_state.state.read().await;
-            match state.structure_tiles.get(&TileCoord { x: tile_x, y: tile_y }) {
-                Some(structure) => structure.kind != "boat",
-                None => true,
-            }
+            !state
+                .boats
+                .values()
+                .any(|boat| entity_foot_tile(boat.x, boat.y) == (tile_x, tile_y))
         };
     if needs_land {
         let fallback = || spawn_near_campfire(&app_state.world, &app_state.noise);
@@ -261,27 +282,21 @@ async fn handle_socket(socket: WebSocket, app_state: AppState, sid: String, lang
         let lang = player_language(&state, &sid);
         let (doc_x, doc_y) = player_position_from_doc(&doc);
         let (tile_x, tile_y) = entity_foot_tile(doc_x, doc_y);
-        let boat_structure = state
-            .structure_tiles
-            .get(&TileCoord { x: tile_x, y: tile_y })
+        let boat_entity = state
+            .boats
+            .values()
+            .find(|boat| entity_foot_tile(boat.x, boat.y) == (tile_x, tile_y))
             .cloned();
         let player = state
             .players
             .entry(sid.clone())
             .or_insert_with(|| Player::from_doc(doc.clone()));
         player.sync_from_doc(&doc);
-        if let Some(structure) = boat_structure {
-            if structure.kind == "boat" {
-                let (bx, by) = tile_anchor_position(structure.x, structure.y);
-                player.x = bx;
-                player.y = by;
-                player.in_boat = true;
-                player.boat_id = Some(structure.id);
-                player.boat_tile = Some(TileCoord {
-                    x: structure.x,
-                    y: structure.y,
-                });
-            }
+        if let Some(boat) = boat_entity {
+            player.x = boat.x;
+            player.y = boat.y;
+            player.in_boat = true;
+            player.boat_id = Some(boat.id);
         }
         ServerMessage::Welcome {
             player: player.self_view(),
@@ -592,6 +607,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     let mut requires_land = true;
     let mut require_water = false;
     let mut require_near_water = false;
+    let mut is_boat = false;
     let lang = player_language(&state, &player_id);
 
     let build_kind = kind.as_str();
@@ -708,9 +724,9 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             requires_land = false;
             require_water = true;
             require_near_water = true;
+            is_boat = true;
             let coord = TileCoord { x, y };
             tiles.push(coord);
-            placements.push((coord, "boat".to_string()));
         }
         _ => {
             send_system_message(
@@ -785,6 +801,19 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             );
             return;
         }
+        if is_boat
+            && state
+                .boats
+                .values()
+                .any(|boat| entity_foot_tile(boat.x, boat.y) == (tile.x, tile.y))
+        {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_spot_occupied(lang).to_string(),
+            );
+            return;
+        }
         if resource_at_tile(&state, tile.x, tile.y) {
             send_system_message(
                 &mut state,
@@ -811,7 +840,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         }
     }
 
-    if placements.is_empty() {
+    if !is_boat && placements.is_empty() {
         for tile in &tiles {
             placements.push((TileCoord { x: tile.x, y: tile.y }, structure_kind.clone()));
         }
@@ -842,6 +871,56 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             return;
         }
         inventory_items = Some(items);
+    }
+
+    if is_boat {
+        let (boat_x, boat_y) = tile_anchor_position(x, y);
+        let boat_id = state.next_id();
+        let boat = Boat {
+            id: boat_id,
+            x: boat_x,
+            y: boat_y,
+            owner_id: player_id.clone(),
+            last_saved_ms: now_millis(),
+        };
+        state.boats.insert(boat_id, boat.clone());
+
+        if let Some(items) = inventory_items {
+            if let Some(sender) = state.clients.get(sid) {
+                let _ = sender.send(ServerMessage::Inventory { items });
+            }
+        }
+
+        let boat_public = BoatPublic::from(&boat);
+        let chunk = chunk_coord_for_position(boat.x, boat.y, app_state.world.chunk_size);
+        send_to_players_in_chunk(
+            &state,
+            app_state.world.chunk_size,
+            chunk,
+            ServerMessage::EntitiesUpdate {
+                players: Vec::new(),
+                monsters: Vec::new(),
+                projectiles: Vec::new(),
+                boats: vec![boat_public],
+            },
+        );
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_build_success(lang, build_kind),
+        );
+
+        let store = app_state.store.clone();
+        let doc = BoatDoc {
+            id: boat_id as i64,
+            x: boat.x,
+            y: boat.y,
+            owner_id: boat.owner_id,
+        };
+        tokio::spawn(async move {
+            let _ = store.insert_boat(&doc).await;
+        });
+        return;
     }
 
     let structure_id = state.next_structure_id();
@@ -1108,6 +1187,7 @@ fn spawn_game_loop(app_state: AppState) {
 
 async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
     let mut to_save = Vec::new();
+    let mut boats_to_save = Vec::new();
     {
         let mut state = app_state.state.write().await;
         let dt = TICK_MS as f32 / 1000.0;
@@ -1117,7 +1197,6 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
             let input = state.inputs.get(&id).cloned().unwrap_or_default();
             if let Some(mut player) = state.players.remove(&id) {
                 let prev_inventory_hash = player.last_inventory_hash;
-                let prev_boat_tile = player.boat_tile;
                 update_player_movement(
                     &mut player,
                     input,
@@ -1126,7 +1205,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                     dt,
                 );
                 if player.in_boat {
-                    sync_boat_position(&mut player, &mut state, &app_state.world, prev_boat_tile);
+                    sync_boat_position(&mut player, &mut state, &app_state.noise);
                 }
                 handle_player_actions(
                     &mut player,
@@ -1184,6 +1263,7 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
         let mut players_by_chunk: HashMap<ChunkCoord, Vec<PlayerPublic>> = HashMap::new();
         let mut monsters_by_chunk: HashMap<ChunkCoord, Vec<MonsterPublic>> = HashMap::new();
         let mut projectiles_by_chunk: HashMap<ChunkCoord, Vec<ProjectilePublic>> = HashMap::new();
+        let mut boats_by_chunk: HashMap<ChunkCoord, Vec<BoatPublic>> = HashMap::new();
 
         for player in state.players.values() {
             let coord = chunk_coord_for_position(player.x, player.y, chunk_size);
@@ -1206,6 +1286,13 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                 .or_default()
                 .push(ProjectilePublic::from(projectile));
         }
+        for boat in state.boats.values() {
+            let coord = chunk_coord_for_position(boat.x, boat.y, chunk_size);
+            boats_by_chunk
+                .entry(coord)
+                .or_default()
+                .push(BoatPublic::from(boat));
+        }
 
         let client_entries: Vec<(String, mpsc::UnboundedSender<ServerMessage>)> = state
             .clients
@@ -1222,9 +1309,11 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
             let mut visible_players = Vec::new();
             let mut visible_monsters = Vec::new();
             let mut visible_projectiles = Vec::new();
+            let mut visible_boats = Vec::new();
             let mut visible_player_ids = HashSet::new();
             let mut visible_monster_ids = HashSet::new();
             let mut visible_projectile_ids = HashSet::new();
+            let mut visible_boat_ids = HashSet::new();
 
             for dx in -ENTITY_VISIBILITY_RADIUS..=ENTITY_VISIBILITY_RADIUS {
                 for dy in -ENTITY_VISIBILITY_RADIUS..=ENTITY_VISIBILITY_RADIUS {
@@ -1257,6 +1346,13 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                             }
                         }
                     }
+                    if let Some(boats) = boats_by_chunk.get(&coord) {
+                        for boat_public in boats {
+                            if visible_boat_ids.insert(boat_public.id) {
+                                visible_boats.push(boat_public.clone());
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1279,26 +1375,35 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                 .difference(&visible_projectile_ids)
                 .cloned()
                 .collect();
+            let removed_boats: Vec<u64> = visibility
+                .boats
+                .difference(&visible_boat_ids)
+                .cloned()
+                .collect();
 
             if !removed_players.is_empty()
                 || !removed_monsters.is_empty()
                 || !removed_projectiles.is_empty()
+                || !removed_boats.is_empty()
             {
                 let _ = sender.send(ServerMessage::EntitiesRemove {
                     players: removed_players,
                     monsters: removed_monsters,
                     projectiles: removed_projectiles,
+                    boats: removed_boats,
                 });
             }
 
             visibility.players = visible_player_ids;
             visibility.monsters = visible_monster_ids;
             visibility.projectiles = visible_projectile_ids;
+            visibility.boats = visible_boat_ids;
 
             let _ = sender.send(ServerMessage::EntitiesUpdate {
                 players: visible_players,
                 monsters: visible_monsters,
                 projectiles: visible_projectiles,
+                boats: visible_boats,
             });
         }
 
@@ -1308,10 +1413,25 @@ async fn game_tick(app_state: &AppState, now_ms: i64) -> AppResult<()> {
                 to_save.push(player.to_doc());
             }
         }
+
+        for boat in state.boats.values_mut() {
+            if now_ms - boat.last_saved_ms >= SAVE_INTERVAL_MS {
+                boat.last_saved_ms = now_ms;
+                boats_to_save.push(BoatDoc {
+                    id: boat.id as i64,
+                    x: boat.x,
+                    y: boat.y,
+                    owner_id: boat.owner_id.clone(),
+                });
+            }
+        }
     }
 
     for doc in to_save {
         let _ = app_state.store.save_player(&doc).await;
+    }
+    for doc in boats_to_save {
+        let _ = app_state.store.update_boat(&doc).await;
     }
 
     Ok(())
@@ -1363,7 +1483,6 @@ fn update_player_movement(
             player.x = next_x;
             player.in_boat = false;
             player.boat_id = None;
-            player.boat_tile = None;
         }
         if player.in_boat {
             if can_sail(structure_tiles, noise, player.x, next_y) {
@@ -1372,7 +1491,6 @@ fn update_player_movement(
                 player.y = next_y;
                 player.in_boat = false;
                 player.boat_id = None;
-                player.boat_tile = None;
             }
         }
     } else {
@@ -1538,12 +1656,10 @@ fn handle_player_actions(
                         message_boat_occupied(lang).to_string(),
                     );
                 } else {
-                    let (bx, by) = tile_anchor_position(boat.x, boat.y);
-                    player.x = bx;
-                    player.y = by;
+                    player.x = boat.x;
+                    player.y = boat.y;
                     player.in_boat = true;
                     player.boat_id = Some(boat.id);
-                    player.boat_tile = Some(TileCoord { x: boat.x, y: boat.y });
                     let lang = player_language(state, &player.id);
                     send_system_message(
                         state,
@@ -1555,6 +1671,11 @@ fn handle_player_actions(
                             players: vec![PlayerPublic::from(&*player)],
                             monsters: Vec::new(),
                             projectiles: Vec::new(),
+                            boats: state
+                                .boats
+                                .get(&boat.id)
+                                .map(|entry| vec![BoatPublic::from(entry)])
+                                .unwrap_or_default(),
                         });
                     }
                 }
@@ -1579,95 +1700,20 @@ fn handle_player_actions(
     }
 }
 
-fn sync_boat_position(
-    player: &mut Player,
-    state: &mut GameState,
-    world: &WorldConfig,
-    prev_boat_tile: Option<TileCoord>,
-) {
+fn sync_boat_position(player: &mut Player, state: &mut GameState, noise: &WorldNoise) {
     let boat_id = match player.boat_id {
         Some(id) => id,
         None => return,
     };
+    let boat = match state.boats.get_mut(&boat_id) {
+        Some(boat) => boat,
+        None => return,
+    };
     let (tile_x, tile_y) = entity_foot_tile(player.x, player.y);
-    let new_tile = TileCoord {
-        x: tile_x,
-        y: tile_y,
-    };
-    let mut old_tile = prev_boat_tile.unwrap_or(new_tile);
-    if old_tile == new_tile {
-        player.boat_tile = Some(new_tile);
-        return;
+    if tile_at(noise, tile_x, tile_y) == TILE_WATER {
+        boat.x = player.x;
+        boat.y = player.y;
     }
-
-    let mut boat = None;
-    if let Some(structure) = state.structure_tiles.get(&old_tile) {
-        if structure.id == boat_id && structure.kind == "boat" {
-            boat = Some(structure.clone());
-        }
-    }
-    if boat.is_none() {
-        if let Some((coord, structure)) = state
-            .structure_tiles
-            .iter()
-            .find(|(_, structure)| structure.id == boat_id && structure.kind == "boat")
-        {
-            old_tile = *coord;
-            boat = Some(structure.clone());
-        }
-    }
-    let Some(mut boat) = boat else {
-        player.boat_tile = Some(new_tile);
-        return;
-    };
-
-    if old_tile == new_tile {
-        player.boat_tile = Some(new_tile);
-        return;
-    }
-
-    state.structure_tiles.remove(&old_tile);
-    boat.x = new_tile.x;
-    boat.y = new_tile.y;
-    state.structure_tiles.insert(new_tile, boat.clone());
-    player.boat_tile = Some(new_tile);
-
-    let removed = StructurePublic {
-        id: boat.id,
-        kind: boat.kind.clone(),
-        x: old_tile.x,
-        y: old_tile.y,
-    };
-    let added = StructurePublic {
-        id: boat.id,
-        kind: boat.kind.clone(),
-        x: new_tile.x,
-        y: new_tile.y,
-    };
-    let old_chunk = chunk_coord_for_tile(old_tile.x, old_tile.y, world.chunk_size);
-    let new_chunk = chunk_coord_for_tile(new_tile.x, new_tile.y, world.chunk_size);
-    let mut chunks = HashSet::new();
-    chunks.insert(old_chunk);
-    chunks.insert(new_chunk);
-
-    send_to_players_in_chunks(
-        state,
-        world.chunk_size,
-        &chunks,
-        ServerMessage::StructureUpdate {
-            structures: vec![removed],
-            state: "removed".to_string(),
-        },
-    );
-    send_to_players_in_chunks(
-        state,
-        world.chunk_size,
-        &chunks,
-        ServerMessage::StructureUpdate {
-            structures: vec![added],
-            state: "added".to_string(),
-        },
-    );
 }
 
 fn update_monsters(
@@ -2170,14 +2216,10 @@ fn find_nearby_npc<'a>(player: &Player, data: &'a GameData) -> Option<&'a NpcDef
     None
 }
 
-fn find_nearby_boat(player: &Player, state: &GameState) -> Option<StructureTile> {
-    for structure in state.structure_tiles.values() {
-        if structure.kind != "boat" {
-            continue;
-        }
-        let (bx, by) = tile_anchor_position(structure.x, structure.y);
-        if distance(player.x, player.y, bx, by) <= INTERACT_RANGE {
-            return Some(structure.clone());
+fn find_nearby_boat(player: &Player, state: &GameState) -> Option<Boat> {
+    for boat in state.boats.values() {
+        if distance(player.x, player.y, boat.x, boat.y) <= INTERACT_RANGE {
+            return Some(boat.clone());
         }
     }
     None
@@ -3462,6 +3504,7 @@ fn broadcast_message_inline(state: &GameState, msg: ServerMessage) {
 struct GameStore {
     players: Collection<PlayerDoc>,
     structures: Collection<StructureDoc>,
+    boats: Collection<BoatDoc>,
 }
 
 impl GameStore {
@@ -3471,6 +3514,7 @@ impl GameStore {
         Ok(Self {
             players: db.collection::<PlayerDoc>("players"),
             structures: db.collection::<StructureDoc>("structures"),
+            boats: db.collection::<BoatDoc>("boats"),
         })
     }
 
@@ -3510,11 +3554,33 @@ impl GameStore {
         Ok(docs)
     }
 
+    async fn load_boats(&self) -> AppResult<Vec<BoatDoc>> {
+        let mut cursor = self.boats.find(doc! {}, None).await?;
+        let mut docs = Vec::new();
+        while let Some(result) = cursor.next().await {
+            docs.push(result?);
+        }
+        Ok(docs)
+    }
+
     async fn insert_structures(&self, structures: &[StructureDoc]) -> AppResult<()> {
         if structures.is_empty() {
             return Ok(());
         }
         self.structures.insert_many(structures, None).await?;
+        Ok(())
+    }
+
+    async fn insert_boat(&self, boat: &BoatDoc) -> AppResult<()> {
+        self.boats.insert_one(boat, None).await?;
+        Ok(())
+    }
+
+    async fn update_boat(&self, boat: &BoatDoc) -> AppResult<()> {
+        let opts = ReplaceOptions::builder().upsert(true).build();
+        self.boats
+            .replace_one(doc! { "id": boat.id }, boat, opts)
+            .await?;
         Ok(())
     }
 
@@ -3544,6 +3610,7 @@ struct GameState {
     inputs: HashMap<String, InputState>,
     monsters: HashMap<u64, Monster>,
     projectiles: HashMap<u64, Projectile>,
+    boats: HashMap<u64, Boat>,
     resources: HashMap<ChunkCoord, Vec<ResourceNode>>,
     structure_tiles: HashMap<TileCoord, StructureTile>,
     spawned_chunks: HashSet<ChunkCoord>,
@@ -3563,6 +3630,7 @@ impl GameState {
             inputs: HashMap::new(),
             monsters: HashMap::new(),
             projectiles: HashMap::new(),
+            boats: HashMap::new(),
             resources: HashMap::new(),
             structure_tiles: HashMap::new(),
             spawned_chunks: HashSet::new(),
@@ -3594,6 +3662,7 @@ struct VisibilityState {
     players: HashSet<String>,
     monsters: HashSet<u64>,
     projectiles: HashSet<u64>,
+    boats: HashSet<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -3607,7 +3676,6 @@ struct Player {
     face_y: f32,
     in_boat: bool,
     boat_id: Option<u64>,
-    boat_tile: Option<TileCoord>,
     inventory: HashMap<String, i32>,
     completed_quests: HashSet<String>,
     last_attack_ms: i64,
@@ -3635,7 +3703,6 @@ impl Player {
             face_y: 0.0,
             in_boat: false,
             boat_id: None,
-            boat_tile: None,
             inventory: doc.inventory,
             completed_quests: doc.completed_quests.into_iter().collect(),
             last_attack_ms: 0,
@@ -3658,7 +3725,6 @@ impl Player {
         self.hp = doc.hp;
         self.in_boat = false;
         self.boat_id = None;
-        self.boat_tile = None;
         self.fishing_clicks = 0;
         self.fishing_target = 0;
         self.inventory = doc.inventory.clone();
@@ -3745,6 +3811,15 @@ struct Monster {
 }
 
 #[derive(Debug, Clone)]
+struct Boat {
+    id: u64,
+    x: f32,
+    y: f32,
+    owner_id: String,
+    last_saved_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 struct Projectile {
     id: u64,
     x: f32,
@@ -3802,6 +3877,14 @@ struct StructureDoc {
     kind: String,
     x: i32,
     y: i32,
+    owner_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BoatDoc {
+    id: i64,
+    x: f32,
+    y: f32,
     owner_id: String,
 }
 
@@ -4084,6 +4167,23 @@ impl From<&Monster> for MonsterPublic {
 }
 
 #[derive(Clone, Serialize)]
+struct BoatPublic {
+    id: u64,
+    x: f32,
+    y: f32,
+}
+
+impl From<&Boat> for BoatPublic {
+    fn from(boat: &Boat) -> Self {
+        Self {
+            id: boat.id,
+            x: boat.x,
+            y: boat.y,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
 struct ProjectilePublic {
     id: u64,
     x: f32,
@@ -4206,11 +4306,13 @@ enum ServerMessage {
         players: Vec<PlayerPublic>,
         monsters: Vec<MonsterPublic>,
         projectiles: Vec<ProjectilePublic>,
+        boats: Vec<BoatPublic>,
     },
     EntitiesRemove {
         players: Vec<String>,
         monsters: Vec<u64>,
         projectiles: Vec<u64>,
+        boats: Vec<u64>,
     },
     ResourceUpdate {
         resource: ResourceNodePublic,
