@@ -1449,6 +1449,13 @@
     if (renderlessStructureKinds.has(structure.kind)) {
       return;
     }
+    if (structure.kind === 'boat') {
+      for (const entity of playerEntities.values()) {
+        if (entity.inBoat && entity.boatId === structure.id) {
+          return;
+        }
+      }
+    }
     const entry = structureSprites.get(key);
     if (!entry) return;
     if (entry.sprite.parent) {
@@ -1465,6 +1472,15 @@
       }
     }
     return null;
+  }
+
+  function isBoatInUse(boatId) {
+    for (const entity of playerEntities.values()) {
+      if (entity.inBoat && entity.boatId === boatId) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function syncStructures(structures) {
@@ -2242,11 +2258,17 @@
         case 'structure_update': {
           if (msg.state === 'removed') {
             msg.structures.forEach((structure) => {
+              if (structure.kind === 'boat' && isBoatInUse(structure.id)) {
+                return;
+              }
               removeStructure(structure);
               removeStructureFromChunk(chunkKeyForTile(structure.x, structure.y), structure);
             });
           } else {
             msg.structures.forEach((structure) => {
+              if (structure.kind === 'boat' && isBoatInUse(structure.id)) {
+                return;
+              }
               upsertStructure(structure);
               addStructureToChunk(chunkKeyForTile(structure.x, structure.y), structure);
             });
