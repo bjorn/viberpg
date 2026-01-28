@@ -75,7 +75,7 @@ This document describes the HTTP and WebSocket payloads used by the client and s
   "y": 8
 }
 ```
-- `kind` options: `craft_basic_axe`, `craft_basic_pick`, `hut_wood`, `house_stone`, `bridge_wood`, `bridge_stone`, `path`, `road`, `boat`.
+- `kind` options: `craft_basic_axe`, `craft_basic_pick`, `craft_arrows`, `hut_wood`, `house_stone`, `bridge_wood`, `bridge_stone`, `path`, `road`, `boat`.
 
 #### demolish
 ```json

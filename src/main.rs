@@ -611,16 +611,28 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     let lang = player_language(&state, &player_id);
 
     let build_kind = kind.as_str();
-    if matches!(build_kind, "craft_basic_axe" | "craft_basic_pick") {
-        let (crafted_id, cost) = match build_kind {
-            "craft_basic_axe" => ("basic_axe", 4),
-            "craft_basic_pick" => ("basic_pick", 4),
+    if matches!(
+        build_kind,
+        "craft_basic_axe" | "craft_basic_pick" | "craft_arrows"
+    ) {
+        let (crafted_id, crafted_count, cost) = match build_kind {
+            "craft_basic_axe" => (
+                "basic_axe",
+                1,
+                vec![ItemStack::new("wood", 4)],
+            ),
+            "craft_basic_pick" => (
+                "basic_pick",
+                1,
+                vec![ItemStack::new("wood", 4)],
+            ),
+            "craft_arrows" => (
+                "arrow",
+                6,
+                vec![ItemStack::new("wood", 1), ItemStack::new("stone", 1)],
+            ),
             _ => return,
         };
-        let cost = vec![ItemStack {
-            id: "wood".to_string(),
-            count: cost,
-        }];
         if !has_items(&inventory_snapshot, &cost) {
             send_system_message(
                 &mut state,
@@ -642,7 +654,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
                 );
                 return;
             }
-            add_item(&mut player.inventory, crafted_id, 1);
+            add_item(&mut player.inventory, crafted_id, crafted_count);
             player.last_inventory_hash = inventory_hash(&player.inventory);
             build_inventory_items(&player.inventory, app_state.data.as_ref(), lang)
         };
@@ -659,10 +671,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
 
     match build_kind {
         "hut_wood" => {
-            cost.push(ItemStack {
-                id: "wood".to_string(),
-                count: 20,
-            });
+            cost.push(ItemStack::new("wood", 20));
             let width = 2;
             let height = 2;
             let base_y = y - (height - 1);
@@ -685,10 +694,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             }
         }
         "house_stone" => {
-            cost.push(ItemStack {
-                id: "stone".to_string(),
-                count: 50,
-            });
+            cost.push(ItemStack::new("stone", 50));
             let width = 3;
             let height = 3;
             let base_y = y - (height - 1);
@@ -711,10 +717,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             }
         }
         "bridge_wood" => {
-            cost.push(ItemStack {
-                id: "wood".to_string(),
-                count: 10,
-            });
+            cost.push(ItemStack::new("wood", 10));
             requires_land = false;
             match find_bridge_span(&app_state.noise, x, y) {
                 Some(span) => tiles = span,
@@ -729,10 +732,7 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
             }
         }
         "bridge_stone" => {
-            cost.push(ItemStack {
-                id: "stone".to_string(),
-                count: 20,
-            });
+            cost.push(ItemStack::new("stone", 20));
             requires_land = false;
             match find_bridge_span(&app_state.noise, x, y) {
                 Some(span) => tiles = span,
@@ -754,19 +754,13 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
         }
         "road" => {
             require_shovel = true;
-            cost.push(ItemStack {
-                id: "stone".to_string(),
-                count: 2,
-            });
+            cost.push(ItemStack::new("stone", 2));
             let coord = TileCoord { x, y };
             tiles.push(coord);
             placements.push((coord, "road".to_string()));
         }
         "boat" => {
-            cost.push(ItemStack {
-                id: "wood".to_string(),
-                count: 10,
-            });
+            cost.push(ItemStack::new("wood", 10));
             requires_land = false;
             require_water = true;
             require_near_water = true;
@@ -2566,6 +2560,7 @@ fn message_build_success(lang: Language, kind: &str) -> String {
         Language::De => match kind {
             "craft_basic_axe" => "Du stellst eine Holzaxt her.".to_string(),
             "craft_basic_pick" => "Du stellst eine Holzspitzhacke her.".to_string(),
+            "craft_arrows" => "Du stellst Pfeile her.".to_string(),
             "hut_wood" => "Du baust eine Holzhütte.".to_string(),
             "house_stone" => "Du baust ein Steinhaus.".to_string(),
             "bridge_wood" => "Du baust eine Holzbrücke.".to_string(),
@@ -2578,6 +2573,7 @@ fn message_build_success(lang: Language, kind: &str) -> String {
         Language::En => match kind {
             "craft_basic_axe" => "You craft a wooden axe.".to_string(),
             "craft_basic_pick" => "You craft a wooden pickaxe.".to_string(),
+            "craft_arrows" => "You craft arrows.".to_string(),
             "hut_wood" => "You build a wooden hut.".to_string(),
             "house_stone" => "You build a stone house.".to_string(),
             "bridge_wood" => "You build a wooden bridge.".to_string(),
@@ -4111,6 +4107,15 @@ impl WorldNoise {
 struct ItemStack {
     id: String,
     count: i32,
+}
+
+impl ItemStack {
+    fn new(id: &str, count: i32) -> Self {
+        Self {
+            id: id.to_string(),
+            count,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]

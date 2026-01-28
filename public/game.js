@@ -61,6 +61,7 @@
       buildStatusCraftRequested: 'Crafting requested.',
       buildOptionCraftAxe: 'Wooden Axe (4 wood)',
       buildOptionCraftPick: 'Wooden Pickaxe (4 wood)',
+      buildOptionCraftArrows: 'Arrows x6 (1 wood + 1 stone)',
       buildOptionHut: 'Wood Hut (20 wood)',
       buildOptionHouse: 'Stone House (50 stone)',
       buildOptionBridgeWood: 'Wood Bridge (10 wood)',
@@ -110,6 +111,7 @@
       buildStatusCraftRequested: 'Herstellung angefragt.',
       buildOptionCraftAxe: 'Holzaxt (4 Holz)',
       buildOptionCraftPick: 'Holzspitzhacke (4 Holz)',
+      buildOptionCraftArrows: 'Pfeile x6 (1 Holz + 1 Stein)',
       buildOptionHut: 'Holzhütte (20 Holz)',
       buildOptionHouse: 'Steinhaus (50 Stein)',
       buildOptionBridgeWood: 'Holzbrücke (10 Holz)',
@@ -302,7 +304,7 @@
   let nameStyle = null;
   let pendingName = null;
   let buildMode = null;
-  const craftKinds = new Set(['craft_basic_axe', 'craft_basic_pick']);
+  const craftKinds = new Set(['craft_basic_axe', 'craft_basic_pick', 'craft_arrows']);
   let pendingDemolish = null;
   let buildPreviewSprite = null;
   let buildPreviewKind = null;
@@ -692,6 +694,7 @@
     const buildLabels = {
       craft_basic_axe: t('buildOptionCraftAxe'),
       craft_basic_pick: t('buildOptionCraftPick'),
+      craft_arrows: t('buildOptionCraftArrows'),
       hut_wood: t('buildOptionHut'),
       house_stone: t('buildOptionHouse'),
       bridge_wood: t('buildOptionBridgeWood'),
