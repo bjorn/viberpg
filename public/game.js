@@ -58,6 +58,9 @@
       buildStatusDemolishConfirm: 'Click again to confirm demolition.',
       buildStatusDemolishRequested: 'Demolition requested.',
       buildStatusPlacementRequested: 'Placement requested.',
+      buildStatusCraftRequested: 'Crafting requested.',
+      buildOptionCraftAxe: 'Wooden Axe (4 wood)',
+      buildOptionCraftPick: 'Wooden Pickaxe (4 wood)',
       buildOptionHut: 'Wood Hut (20 wood)',
       buildOptionHouse: 'Stone House (50 stone)',
       buildOptionBridgeWood: 'Wood Bridge (10 wood)',
@@ -104,6 +107,9 @@
       buildStatusDemolishConfirm: 'Nochmal klicken zum Bestätigen.',
       buildStatusDemolishRequested: 'Abriss angefragt.',
       buildStatusPlacementRequested: 'Platzierung angefragt.',
+      buildStatusCraftRequested: 'Herstellung angefragt.',
+      buildOptionCraftAxe: 'Holzaxt (4 Holz)',
+      buildOptionCraftPick: 'Holzspitzhacke (4 Holz)',
       buildOptionHut: 'Holzhütte (20 Holz)',
       buildOptionHouse: 'Steinhaus (50 Stein)',
       buildOptionBridgeWood: 'Holzbrücke (10 Holz)',
@@ -296,6 +302,7 @@
   let nameStyle = null;
   let pendingName = null;
   let buildMode = null;
+  const craftKinds = new Set(['craft_basic_axe', 'craft_basic_pick']);
   let pendingDemolish = null;
   let buildPreviewSprite = null;
   let buildPreviewKind = null;
@@ -683,6 +690,8 @@
       buildStatus.textContent = t('buildStatusSelect');
     }
     const buildLabels = {
+      craft_basic_axe: t('buildOptionCraftAxe'),
+      craft_basic_pick: t('buildOptionCraftPick'),
       hut_wood: t('buildOptionHut'),
       house_stone: t('buildOptionHouse'),
       bridge_wood: t('buildOptionBridgeWood'),
@@ -863,6 +872,36 @@
     buildStatus.textContent = text;
   }
 
+  function isCraftKind(kind) {
+    return craftKinds.has(kind);
+  }
+
+  function getPlayerTile() {
+    if (!playerId) return null;
+    const playerEntity = playerEntities.get(playerId);
+    const px = playerEntity ? playerEntity.x : playerState?.x;
+    const py = playerEntity ? playerEntity.y : playerState?.y;
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+    return {
+      x: Math.floor(px),
+      y: Math.floor(py),
+    };
+  }
+
+  function requestCraft(kind) {
+    if (!wsOpen) {
+      setBuildStatus(t('buildStatusNotConnected'));
+      return;
+    }
+    const tile = getPlayerTile();
+    if (!tile) {
+      setBuildStatus(t('buildStatusNotConnected'));
+      return;
+    }
+    sendMessage({ type: 'build', kind, x: tile.x, y: tile.y });
+    setBuildStatus(t('buildStatusCraftRequested'));
+  }
+
   function setBuildMode(mode) {
     buildMode = buildMode === mode ? null : mode;
     pendingDemolish = null;
@@ -875,6 +914,9 @@
     } else if (buildMode === 'demolish') {
       setBuildStatus(t('buildStatusDemolish'));
       clearBuildPreview();
+    } else if (isCraftKind(buildMode)) {
+      setBuildStatus(t('buildStatusCraftRequested'));
+      clearBuildPreview();
     } else {
       setBuildStatus(t('buildStatusPlace'));
       updateBuildPreview(lastPointerTile);
@@ -882,7 +924,7 @@
   }
 
   function ensureBuildPreview(kind) {
-    if (!kind || kind === 'demolish') return;
+    if (!kind || kind === 'demolish' || isCraftKind(kind)) return;
     ensureTextures();
     const textureKey = baseStructureKind(kind).replace(/_(h|v)$/, '');
     const texture = textures[textureKey];
@@ -920,7 +962,7 @@
   }
 
   function updateBuildPreview(tile) {
-    if (!tile || !buildMode || buildMode === 'demolish') {
+    if (!tile || !buildMode || buildMode === 'demolish' || isCraftKind(buildMode)) {
       clearBuildPreview();
       return;
     }
@@ -979,6 +1021,10 @@
     if (!buildMode) return false;
     if (!wsOpen) {
       setBuildStatus(t('buildStatusNotConnected'));
+      return true;
+    }
+    if (isCraftKind(buildMode)) {
+      requestCraft(buildMode);
       return true;
     }
     const tile = screenToTile(event);
@@ -2651,6 +2697,13 @@
       button.addEventListener('click', () => {
         const mode = button.dataset.build;
         if (mode) {
+          if (isCraftKind(mode)) {
+            if (buildMode) {
+              setBuildMode(buildMode);
+            }
+            requestCraft(mode);
+            return;
+          }
           setBuildMode(mode);
         }
       });

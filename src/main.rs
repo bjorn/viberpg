@@ -611,6 +611,52 @@ async fn handle_build_request(app_state: &AppState, sid: &str, kind: String, x: 
     let lang = player_language(&state, &player_id);
 
     let build_kind = kind.as_str();
+    if matches!(build_kind, "craft_basic_axe" | "craft_basic_pick") {
+        let (crafted_id, cost) = match build_kind {
+            "craft_basic_axe" => ("basic_axe", 4),
+            "craft_basic_pick" => ("basic_pick", 4),
+            _ => return,
+        };
+        let cost = vec![ItemStack {
+            id: "wood".to_string(),
+            count: cost,
+        }];
+        if !has_items(&inventory_snapshot, &cost) {
+            send_system_message(
+                &mut state,
+                &player_id,
+                message_not_enough_materials(lang).to_string(),
+            );
+            return;
+        }
+        let items = {
+            let player = match state.players.get_mut(sid) {
+                Some(player) => player,
+                None => return,
+            };
+            if !remove_items(&mut player.inventory, &cost) {
+                send_system_message(
+                    &mut state,
+                    &player_id,
+                    message_not_enough_materials(lang).to_string(),
+                );
+                return;
+            }
+            add_item(&mut player.inventory, crafted_id, 1);
+            player.last_inventory_hash = inventory_hash(&player.inventory);
+            build_inventory_items(&player.inventory, app_state.data.as_ref(), lang)
+        };
+        if let Some(sender) = state.clients.get(sid) {
+            let _ = sender.send(ServerMessage::Inventory { items });
+        }
+        send_system_message(
+            &mut state,
+            &player_id,
+            message_build_success(lang, build_kind),
+        );
+        return;
+    }
+
     match build_kind {
         "hut_wood" => {
             cost.push(ItemStack {
@@ -1570,7 +1616,14 @@ fn handle_player_actions(
                 if let Some((resource, def)) = find_nearby_resource(player, state, data) {
                     did_gather = true;
                     let tool_power = best_tool_power(&player.inventory, data, &def.tool);
-                    if let Some(mut power) = tool_power {
+                    let power = tool_power.or_else(|| {
+                        if def.tool == "axe" {
+                            Some(1)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(mut power) = power {
                         if resource.kind == "rock" {
                             power = (power as f32 / resource.size.max(1) as f32).ceil() as i32;
                         }
@@ -2380,9 +2433,9 @@ fn localize_item_name(data: &GameData, item_id: &str, lang: Language) -> String 
         "rabbit_leg" => "Kaninchenkeule",
         "slime_core" => "Schleimkern",
         "arrow" => "Pfeil",
-        "basic_axe" => "Einfache Axt",
+        "basic_axe" => "Holzaxt",
         "fine_axe" => "Gute Axt",
-        "basic_pick" => "Einfache Spitzhacke",
+        "basic_pick" => "Holzspitzhacke",
         "basic_shovel" => "Schaufel",
         "fishing_rod" => "Angel",
         "fish" => "Fisch",
@@ -2511,6 +2564,8 @@ fn localize_quest_description(quest: &QuestDef, lang: Language) -> String {
 fn message_build_success(lang: Language, kind: &str) -> String {
     match lang {
         Language::De => match kind {
+            "craft_basic_axe" => "Du stellst eine Holzaxt her.".to_string(),
+            "craft_basic_pick" => "Du stellst eine Holzspitzhacke her.".to_string(),
             "hut_wood" => "Du baust eine Holzhütte.".to_string(),
             "house_stone" => "Du baust ein Steinhaus.".to_string(),
             "bridge_wood" => "Du baust eine Holzbrücke.".to_string(),
@@ -2521,6 +2576,8 @@ fn message_build_success(lang: Language, kind: &str) -> String {
             _ => "Unbekannte Bauoption.".to_string(),
         },
         Language::En => match kind {
+            "craft_basic_axe" => "You craft a wooden axe.".to_string(),
+            "craft_basic_pick" => "You craft a wooden pickaxe.".to_string(),
             "hut_wood" => "You build a wooden hut.".to_string(),
             "house_stone" => "You build a stone house.".to_string(),
             "bridge_wood" => "You build a wooden bridge.".to_string(),

@@ -77,10 +77,10 @@
   },
   {
     "id": "basic_axe",
-    "name": "Basic Axe",
+    "name": "Wooden Axe",
     "kind": "tool",
     "tool": "axe",
-    "power": 1,
+    "power": 2,
     "weapon": null,
     "ammo_for": null
   },
@@ -89,13 +89,13 @@
     "name": "Fine Axe",
     "kind": "tool",
     "tool": "axe",
-    "power": 2,
+    "power": 3,
     "weapon": null,
     "ammo_for": null
   },
   {
     "id": "basic_pick",
-    "name": "Basic Pickaxe",
+    "name": "Wooden Pickaxe",
     "kind": "tool",
     "tool": "pick",
     "power": 1,
