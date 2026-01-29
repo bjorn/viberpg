@@ -3,13 +3,59 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Online RPG - Mistwood Vale</title>
+  <title>VibeRPG</title>
   <link rel="stylesheet" href="styles.css" />
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet" />
 </head>
 <body>
+  <div id="startup" class="startup is-connecting" aria-live="polite">
+    <div class="startup-logo" aria-hidden="true">
+      <svg id="startup-logo" viewBox="0 0 640 160" role="img" aria-label="VibeRPG">
+        <defs>
+          <linearGradient id="logoGradient" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#7ad5a3" />
+            <stop offset="50%" stop-color="#f0d384" />
+            <stop offset="100%" stop-color="#7ad5a3" />
+          </linearGradient>
+          <filter id="logoGlow" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="6" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+        <rect x="20" y="24" width="600" height="112" rx="24" fill="rgba(8,12,16,0.65)" stroke="url(#logoGradient)" stroke-width="4" />
+        <text x="320" y="106" text-anchor="middle" font-family="'Press Start 2P', 'VT323', monospace" font-size="42" fill="url(#logoGradient)" filter="url(#logoGlow)">
+          VibeRPG
+        </text>
+        <circle cx="560" cy="80" r="20" fill="none" stroke="url(#logoGradient)" stroke-width="4" />
+        <circle cx="560" cy="80" r="8" fill="url(#logoGradient)" />
+      </svg>
+    </div>
+    <div class="startup-card">
+      <div id="startup-connecting" class="startup-connecting">
+        <div class="connecting-sigil" aria-hidden="true">
+          <span class="sigil-core"></span>
+          <span class="sigil-orbit"></span>
+          <span class="sigil-orbit orbit-two"></span>
+        </div>
+        <div id="startup-status-title" class="startup-status-title">Connecting...</div>
+        <div id="startup-status-subtitle" class="startup-status-subtitle">Opening the gate to the realm.</div>
+      </div>
+      <div id="startup-form" class="startup-form">
+        <label id="startup-name-label" for="name-input">Choose your name</label>
+        <div class="startup-input-row">
+          <input id="name-input" type="text" maxlength="20" placeholder="Name" autocomplete="nickname" aria-label="Player name" />
+          <button id="name-save" type="button" aria-label="Enter game">Enter</button>
+        </div>
+        <div id="startup-name-hint" class="startup-hint">Press Enter to begin</div>
+      </div>
+    </div>
+  </div>
+
   <div id="hud">
-    <div id="title" class="ui-scale origin-top-left">Mistwood Vale</div>
+    <div id="title" class="ui-scale origin-top-left">VibeRPG</div>
     <div id="status" class="ui-scale origin-top-left">
       <span id="status-text" class="status-text">Connecting...</span>
       <span id="status-hearts" class="status-hearts" role="img" aria-label="HP"></span>
@@ -96,10 +142,6 @@
         </div>
       </div>
       <div class="panel-body">
-        <div id="name-panel" class="field-row">
-          <input id="name-input" type="text" maxlength="20" placeholder="Name" autocomplete="nickname" aria-label="Player name" />
-          <button id="name-save" type="button" aria-label="Set name">Set</button>
-        </div>
         <div id="chat-log"></div>
         <div class="chat-input-wrap">
           <input id="chat-input" type="text" maxlength="160" placeholder="Say something..." />

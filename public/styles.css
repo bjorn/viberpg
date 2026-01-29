@@ -37,6 +37,169 @@ body.gamepad-active {
   pointer-events: none;
 }
 
+#startup {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: clamp(24px, 6vh, 64px) 20px 32px;
+  gap: 22px;
+  z-index: 40;
+  background: radial-gradient(circle at top, rgba(36, 58, 52, 0.85), rgba(11, 14, 20, 0.92) 55%, rgba(5, 6, 8, 0.98) 100%);
+  overflow: hidden;
+  transition: opacity 0.4s ease;
+  pointer-events: auto;
+}
+
+#startup::before {
+  content: '';
+  position: absolute;
+  inset: -30%;
+  background: radial-gradient(circle at 20% 20%, rgba(122, 213, 163, 0.2), transparent 55%),
+    radial-gradient(circle at 80% 30%, rgba(240, 211, 132, 0.18), transparent 60%),
+    radial-gradient(circle at 40% 80%, rgba(122, 213, 163, 0.14), transparent 65%);
+  opacity: 0.8;
+  animation: startupDrift 18s linear infinite;
+}
+
+#startup.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.startup-logo,
+.startup-card {
+  position: relative;
+  z-index: 1;
+}
+
+.startup-logo {
+  width: min(640px, 92vw);
+}
+
+#startup-logo {
+  width: 100%;
+  height: auto;
+}
+
+.startup-card {
+  width: min(520px, 92vw);
+  background: rgba(8, 12, 16, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55), 0 0 24px rgba(122, 213, 163, 0.2);
+  border-radius: 20px;
+  padding: 24px 24px 20px;
+  text-align: center;
+}
+
+.startup-connecting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.connecting-sigil {
+  position: relative;
+  width: 120px;
+  height: 120px;
+}
+
+.sigil-core {
+  position: absolute;
+  inset: 40px;
+  border-radius: 50%;
+  background: rgba(240, 211, 132, 0.95);
+  box-shadow: 0 0 18px rgba(240, 211, 132, 0.7), 0 0 30px rgba(122, 213, 163, 0.4);
+  animation: sigilPulse 1.8s ease-in-out infinite;
+}
+
+.sigil-orbit {
+  position: absolute;
+  inset: 12px;
+  border-radius: 50%;
+  border: 1px solid rgba(122, 213, 163, 0.6);
+  box-shadow: inset 0 0 12px rgba(122, 213, 163, 0.4);
+  animation: sigilSpin 5s linear infinite;
+}
+
+.sigil-orbit.orbit-two {
+  inset: 24px;
+  border-style: dashed;
+  border-color: rgba(240, 211, 132, 0.7);
+  animation-duration: 3.6s;
+  animation-direction: reverse;
+}
+
+.startup-status-title {
+  font-family: "Press Start 2P", cursive;
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: var(--accent-2);
+}
+
+.startup-status-subtitle {
+  font-size: 20px;
+  color: var(--text);
+}
+
+.startup-form {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+#startup.is-ready .startup-connecting {
+  display: none;
+}
+
+#startup.is-ready .startup-form {
+  display: flex;
+}
+
+.startup-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.startup-form #name-input {
+  flex: 1;
+  min-width: 180px;
+  font-size: 20px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border-color: rgba(122, 213, 163, 0.45);
+}
+
+.startup-form #name-save {
+  min-width: 110px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 20px;
+  letter-spacing: 1px;
+  border-color: rgba(240, 211, 132, 0.65);
+  color: var(--accent-2);
+  box-shadow: 0 0 16px rgba(240, 211, 132, 0.2);
+}
+
+.startup-form #name-save:active {
+  transform: translateY(1px);
+}
+
+#startup-name-label {
+  font-size: 18px;
+  color: var(--text-muted);
+}
+
+.startup-hint {
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
 #title {
   position: absolute;
   top: 20px;
@@ -107,6 +270,7 @@ body.gamepad-active {
   color: var(--text);
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(8, 12, 16, 0.7);
+  border-radius: 10px;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
@@ -140,6 +304,7 @@ body.gamepad-active {
   line-height: 0;
   color: var(--text);
   border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
   cursor: pointer;
   pointer-events: auto;
   user-select: none;
@@ -153,6 +318,7 @@ body.gamepad-active {
   align-items: center;
   gap: 6px;
   padding: 4px 6px;
+  border-radius: 10px;
 }
 
 #ui-scale-control #ui-scale-value {
@@ -186,6 +352,8 @@ body.gamepad-active {
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 18px var(--glow);
   backdrop-filter: blur(6px);
+  border-radius: 12px;
+  padding: 10px;
 }
 
 .ui-scale {
@@ -213,16 +381,28 @@ body.gamepad-active {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
+  padding: 12px 12px;
+  margin: -10px -10px 0 -10px;
+  min-height: 44px;
+  position: relative;
+  cursor: pointer;
 }
 
 .panel.collapsed .panel-header {
   margin-bottom: 0;
 }
 
+.panel.collapsed {
+  padding-bottom: 0;
+}
+
 .panel-controls {
   display: flex;
   gap: 6px;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .panel-btn {
@@ -232,6 +412,7 @@ body.gamepad-active {
   font-family: "VT323", monospace;
   font-size: 14px;
   padding: 2px 6px;
+  border-radius: 6px;
   cursor: pointer;
   pointer-events: auto;
   user-select: none;
@@ -247,10 +428,13 @@ body.gamepad-active {
 .panel-toggle {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 22px;
-  padding: 0;
+  justify-content: flex-end;
+  width: 100%;
+  height: 100%;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
 }
 
 .panel-toggle svg {
@@ -272,7 +456,6 @@ body.gamepad-active {
   left: 20px;
   bottom: 150px;
   width: 320px;
-  padding: 14px 16px;
   font-size: 20px;
   line-height: 1.2;
   pointer-events: auto;
@@ -295,7 +478,6 @@ body.gamepad-active {
   left: 20px;
   top: 90px;
   width: 220px;
-  padding: 12px;
   pointer-events: auto;
 }
 
@@ -304,6 +486,7 @@ body.gamepad-active {
   font-size: 10px;
   letter-spacing: 1px;
   color: var(--accent-2);
+  line-height: 1;
 }
 
 #inventory-list {
@@ -349,7 +532,6 @@ body.gamepad-active {
   left: 20px;
   top: 330px;
   width: 220px;
-  padding: 12px;
   pointer-events: auto;
 }
 
@@ -369,6 +551,7 @@ body.gamepad-active {
   font-size: 18px;
   text-align: left;
   padding: 6px 8px;
+  border-radius: 6px;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
@@ -396,7 +579,6 @@ body.gamepad-active {
   right: 20px;
   bottom: 20px;
   width: 320px;
-  padding: 12px;
   pointer-events: auto;
 }
 
@@ -464,6 +646,7 @@ body.gamepad-active {
   font-family: "VT323", monospace;
   font-size: 20px;
   outline: none;
+  border-radius: 10px;
 }
 
 .chat-input-wrap {
@@ -624,6 +807,24 @@ body.gamepad-active {
   display: none;
 }
 
+@media (max-width: 720px) {
+  #startup {
+    padding-top: calc(24px + env(safe-area-inset-top));
+  }
+
+  .startup-card {
+    padding: 20px 18px 18px;
+  }
+
+  .startup-input-row {
+    flex-direction: column;
+  }
+
+  .startup-form #name-save {
+    width: 100%;
+  }
+}
+
 @media (pointer: coarse) {
   #touch-joystick {
     display: block;
@@ -752,6 +953,10 @@ body.gamepad-active {
   #title {
     font-size: 14px;
   }
+
+  .startup-status-subtitle {
+    font-size: 18px;
+  }
 }
 
 @media (max-width: 700px) and (pointer: fine) {
@@ -766,5 +971,38 @@ body.gamepad-active {
 
   #build-menu {
     width: 200px;
+  }
+}
+
+@keyframes sigilSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes sigilPulse {
+  0%,
+  100% {
+    transform: scale(0.92);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+}
+
+@keyframes startupDrift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-4%, 3%, 0) scale(1.05);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
   }
 }

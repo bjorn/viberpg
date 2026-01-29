@@ -6,6 +6,11 @@
   const chatInput = document.getElementById('chat-input');
   const nameInput = document.getElementById('name-input');
   const nameSave = document.getElementById('name-save');
+  const startupEl = document.getElementById('startup');
+  const startupStatusTitle = document.getElementById('startup-status-title');
+  const startupStatusSubtitle = document.getElementById('startup-status-subtitle');
+  const startupNameLabel = document.getElementById('startup-name-label');
+  const startupNameHint = document.getElementById('startup-name-hint');
   const inventoryList = document.getElementById('inventory-list');
   const inventoryPanel = document.getElementById('inventory');
   const buildMenu = document.getElementById('build-menu');
@@ -64,8 +69,15 @@
       fullscreenExit: 'Exit fullscreen',
       namePlaceholder: 'Name',
       nameAria: 'Player name',
-      nameSet: 'Set',
-      nameSetAria: 'Set name',
+      nameSet: 'Enter',
+      nameSetAria: 'Enter game',
+      startupConnectingTitle: 'Connecting...',
+      startupConnectingSubtitle: 'Opening the gate to the realm.',
+      startupReadyTitle: 'Connection stabilized.',
+      startupReadySubtitle: 'Choose your name to enter.',
+      startupNameLabel: 'Choose your name',
+      startupNameHint: 'Press Enter to begin',
+      startupReconnectSubtitle: 'Rebinding the channel...',
       chatPlaceholder: 'Say something...',
       buildStatusSelect: 'Select a build option.',
       buildStatusDemolish: 'Click a structure twice to remove it.',
@@ -114,8 +126,15 @@
       fullscreenExit: 'Vollbild verlassen',
       namePlaceholder: 'Name',
       nameAria: 'Spielername',
-      nameSet: 'Setzen',
-      nameSetAria: 'Name setzen',
+      nameSet: 'Betreten',
+      nameSetAria: 'Spiel betreten',
+      startupConnectingTitle: 'Verbinde...',
+      startupConnectingSubtitle: 'Das Tor zur Welt öffnet sich.',
+      startupReadyTitle: 'Verbindung steht.',
+      startupReadySubtitle: 'Wähle deinen Namen zum Starten.',
+      startupNameLabel: 'Wähle deinen Namen',
+      startupNameHint: 'Enter zum Starten',
+      startupReconnectSubtitle: 'Verbindung wird erneuert...',
       chatPlaceholder: 'Sag etwas...',
       buildStatusSelect: 'Bauoption wählen.',
       buildStatusDemolish: 'Gebäude doppelt anklicken zum Entfernen.',
@@ -157,6 +176,8 @@
   let dialogTimer = null;
   let ws = null;
   let wsOpen = false;
+  let startupEntered = false;
+  let initialName = null;
 
   const MAX_HEARTS = 10;
   let tileSize = 32;
@@ -319,6 +340,42 @@
   const MAX_NAME_CHARS = 20;
   const GATHER_RANGE = 1.1;
   const INTERACT_RANGE = 1.2;
+  const randomNameAdjectives = [
+    'Bright',
+    'Duskwind',
+    'Ember',
+    'Frost',
+    'Glimmer',
+    'Iron',
+    'Lumen',
+    'Moss',
+    'Nova',
+    'Rune',
+    'Silver',
+    'Storm',
+    'Sun',
+    'Thorn',
+    'Vale',
+    'Wild',
+  ];
+  const randomNameNouns = [
+    'Walker',
+    'Warden',
+    'Seeker',
+    'Rider',
+    'Weaver',
+    'Smith',
+    'Scout',
+    'Ranger',
+    'Voyager',
+    'Sage',
+    'Crafter',
+    'Hunter',
+    'Drifter',
+    'Guardian',
+    'Harbor',
+    'Blossom',
+  ];
   let localTyping = false;
   let typingTimer = null;
   let lastTypingSent = 0;
@@ -802,6 +859,19 @@
       nameSave.textContent = t('nameSet');
       nameSave.setAttribute('aria-label', t('nameSetAria'));
     }
+    if (startupNameLabel) {
+      startupNameLabel.textContent = t('startupNameLabel');
+    }
+    if (startupNameHint) {
+      startupNameHint.textContent = t('startupNameHint');
+    }
+    if (startupEl && !startupEntered) {
+      if (startupEl.classList.contains('is-ready')) {
+        setStartupStatus(t('startupReadyTitle'), t('startupReadySubtitle'));
+      } else {
+        setStartupStatus(t('startupConnectingTitle'), t('startupConnectingSubtitle'));
+      }
+    }
     if (chatInput) {
       chatInput.placeholder = t('chatPlaceholder');
     }
@@ -864,6 +934,45 @@
     return value.trim().replace(/\s+/g, ' ').slice(0, MAX_NAME_CHARS);
   }
 
+  function generateRandomName() {
+    const adjective = randomNameAdjectives[Math.floor(Math.random() * randomNameAdjectives.length)];
+    const noun = randomNameNouns[Math.floor(Math.random() * randomNameNouns.length)];
+    return `${adjective} ${noun}`.slice(0, MAX_NAME_CHARS);
+  }
+
+  function setStartupStatus(title, subtitle) {
+    if (startupStatusTitle && startupStatusTitle.textContent !== title) {
+      startupStatusTitle.textContent = title;
+    }
+    if (startupStatusSubtitle && startupStatusSubtitle.textContent !== subtitle) {
+      startupStatusSubtitle.textContent = subtitle;
+    }
+  }
+
+  function setStartupConnecting() {
+    if (!startupEl || startupEntered) return;
+    startupEl.classList.remove('is-ready', 'is-hidden');
+    startupEl.classList.add('is-connecting');
+    setStartupStatus(t('startupConnectingTitle'), t('startupConnectingSubtitle'));
+  }
+
+  function setStartupReady() {
+    if (!startupEl || startupEntered) return;
+    startupEl.classList.add('is-ready');
+    startupEl.classList.remove('is-connecting');
+    setStartupStatus(t('startupReadyTitle'), t('startupReadySubtitle'));
+    if (nameInput) {
+      nameInput.focus();
+      nameInput.select();
+    }
+  }
+
+  function hideStartup() {
+    if (!startupEl) return;
+    startupEl.classList.add('is-hidden');
+    startupEntered = true;
+  }
+
   function refreshNameStyle() {
     const fontSize = Math.max(12, Math.round(tileSize * 0.5));
     nameStyle = new PIXI.TextStyle({
@@ -882,6 +991,13 @@
 
   function syncLocalName(name) {
     if (!nameInput) return;
+    if (!name && initialName && !pendingName) {
+      lastKnownName = initialName;
+      if (document.activeElement !== nameInput) {
+        nameInput.value = lastKnownName;
+      }
+      return;
+    }
     if (pendingName && name !== pendingName) {
       return;
     }
@@ -929,6 +1045,34 @@
     if (wsOpen) {
       sendMessage({ type: 'set_name', name: normalized });
     }
+  }
+
+  function finalizeStartupEntry() {
+    if (!nameInput) {
+      hideStartup();
+      return;
+    }
+    const normalized = normalizeNameInput(nameInput.value);
+    const fallbackName = normalized || lastKnownName || initialName || 'Wanderer';
+    nameInput.value = fallbackName;
+    if (fallbackName !== lastKnownName) {
+      lastKnownName = fallbackName;
+      pendingName = fallbackName;
+      if (wsOpen) {
+        sendMessage({ type: 'set_name', name: fallbackName });
+      }
+    } else if (pendingName && wsOpen) {
+      sendMessage({ type: 'set_name', name: pendingName });
+    }
+    hideStartup();
+  }
+
+  function handleNameSubmit() {
+    if (startupEl && !startupEntered && startupEl.classList.contains('is-ready')) {
+      finalizeStartupEntry();
+      return;
+    }
+    submitNameChange();
   }
 
   function addChat(text, className) {
@@ -1178,17 +1322,29 @@
     const panel = document.getElementById(panelId);
     if (!panel) return;
     const state = { collapsed: panel.classList.contains('collapsed') };
+    const header = panel.querySelector('.panel-header');
+    const togglePanel = () => {
+      state.collapsed = !state.collapsed;
+      panel.classList.toggle('collapsed', state.collapsed);
+      if (panelId === 'inventory') {
+        updateBuildMenuPosition();
+      }
+    };
+    if (header) {
+      header.addEventListener('click', (event) => {
+        if (event.target && event.target.closest('.panel-btn')) {
+          return;
+        }
+        togglePanel();
+      });
+    }
     panelButtons
       .filter((button) => button.dataset.panel === panelId)
       .forEach((button) => {
         button.addEventListener('click', () => {
           const action = button.dataset.action;
           if (action === 'toggle') {
-            state.collapsed = !state.collapsed;
-            panel.classList.toggle('collapsed', state.collapsed);
-            if (panelId === 'inventory') {
-              updateBuildMenuPosition();
-            }
+            togglePanel();
             return;
           }
         });
@@ -2693,6 +2849,7 @@
     ws.addEventListener('open', () => {
       wsOpen = true;
       setStatusText(t('statusConnected'));
+      setStartupStatus(t('startupConnectingTitle'), t('startupConnectingSubtitle'));
       sendMessage({ type: 'locale', language });
       if (pendingName) {
         sendMessage({ type: 'set_name', name: pendingName });
@@ -2727,6 +2884,7 @@
           setStatusCoords(`${msg.player.x.toFixed(1)}, ${msg.player.y.toFixed(1)}`);
           syncPlayers([msg.player], false);
           requestChunksAround();
+          setStartupReady();
 
           // Auto-start background music after first connection
           (async () => {
@@ -2824,6 +2982,11 @@
       lastAckSeq = 0;
       lastInputDir = { x: 0, y: 0 };
       localRenderOffset = { x: 0, y: 0 };
+      if (!startupEntered && startupEl) {
+        startupEl.classList.remove('is-ready', 'is-hidden');
+        startupEl.classList.add('is-connecting');
+        setStartupStatus(t('statusDisconnected'), t('startupReconnectSubtitle'));
+      }
       setTimeout(connect, 1000);
     });
   }
@@ -3009,13 +3172,13 @@
 
   if (nameInput && nameSave) {
     nameSave.addEventListener('click', () => {
-      submitNameChange();
+      handleNameSubmit();
       nameInput.blur();
     });
 
     nameInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
-        submitNameChange();
+        handleNameSubmit();
         nameInput.blur();
       }
       event.stopPropagation();
@@ -3200,12 +3363,22 @@
     .then((session) => {
       if (session?.name) {
         syncLocalName(session.name);
+      } else if (nameInput) {
+        initialName = generateRandomName();
+        lastKnownName = initialName;
+        nameInput.value = initialName;
       }
+      setStartupConnecting();
       connect();
     })
     .catch(() => {
       setStatusText(t('statusSessionFailed'));
       renderStatusHearts(0);
       setStatusCoords('');
+      if (startupEl) {
+        startupEl.classList.remove('is-ready');
+        startupEl.classList.add('is-connecting');
+        setStartupStatus(t('statusSessionFailed'), t('startupReconnectSubtitle'));
+      }
     });
 })();
