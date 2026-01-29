@@ -26,6 +26,22 @@
   const joystickEl = document.getElementById('touch-joystick');
   const joystickHandle = joystickEl ? joystickEl.querySelector('.stick-handle') : null;
   const actionButtons = Array.from(document.querySelectorAll('.action-btn'));
+  const chatHintEl = document.querySelector('.chat-input-wrap .key-hint');
+  const inputMethodState = { mode: 'keyboard' };
+  const actionShortcutEls = new Map();
+  const actionShortcutDefaults = {};
+  const keyboardActionFallbacks = {
+    attack: 'Space',
+    gather: 'F',
+    interact: 'E',
+  };
+  let gamepadActionLabels = {
+    attack: 'A',
+    gather: 'X',
+    interact: 'Y',
+  };
+  const keyboardChatHint = chatHintEl ? chatHintEl.textContent.trim() : 'Enter';
+  const gamepadChatHint = 'Start';
   const buildMenuBaseTop = buildMenu
     ? Number.parseFloat(window.getComputedStyle(buildMenu).top) || buildMenu.offsetTop
     : 0;
@@ -282,6 +298,18 @@
     dirY: 0,
     pointerId: null,
   };
+  const gamepadState = {
+    active: false,
+    connected: false,
+    index: null,
+    dirX: 0,
+    dirY: 0,
+    attack: false,
+    gather: false,
+    interact: false,
+    wasActive: false,
+  };
+  const GAMEPAD_DEADZONE = 0.18;
   const INTERP_MS = 120;
   const INPUT_SEND_INTERVAL_MS = 90;
   const PLAYER_SPEED = 3.4;
@@ -318,6 +346,95 @@
   let localRenderOffset = { x: 0, y: 0 };
   let lastStatusHp = null;
   let lastStatusCoords = null;
+
+  function applyGamepadDeadzone(value, deadzone) {
+    const magnitude = Math.abs(value);
+    if (magnitude < deadzone) return 0;
+    const scaled = (magnitude - deadzone) / (1 - deadzone);
+    return Math.min(1, scaled) * Math.sign(value);
+  }
+
+  function getGamepadFaceLabels(pad) {
+    const id = (pad && pad.id) ? pad.id.toLowerCase() : '';
+    const isNintendo = id.includes('nintendo') || id.includes('switch') || id.includes('joy-con');
+    if (isNintendo) {
+      return { south: 'B', east: 'A', west: 'Y', north: 'X' };
+    }
+    return { south: 'A', east: 'B', west: 'X', north: 'Y' };
+  }
+
+  function updateGamepadLabels(pad) {
+    const labels = getGamepadFaceLabels(pad);
+    const nextLabels = {
+      attack: labels.south,
+      gather: labels.west,
+      interact: labels.north,
+    };
+    const changed =
+      gamepadActionLabels.attack !== nextLabels.attack ||
+      gamepadActionLabels.gather !== nextLabels.gather ||
+      gamepadActionLabels.interact !== nextLabels.interact;
+    if (changed) {
+      gamepadActionLabels = nextLabels;
+      if (inputMethodState.mode === 'gamepad') {
+        updateControlHints('gamepad');
+      }
+    }
+  }
+
+  function readGamepadState() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    let pad = null;
+    if (gamepadState.index != null && pads[gamepadState.index]) {
+      pad = pads[gamepadState.index];
+    } else {
+      for (const candidate of pads) {
+        if (candidate && candidate.connected) {
+          pad = candidate;
+          break;
+        }
+      }
+      gamepadState.index = pad ? pad.index : null;
+    }
+    if (!pad) {
+      gamepadState.connected = false;
+      gamepadState.active = false;
+      gamepadState.wasActive = false;
+      gamepadState.dirX = 0;
+      gamepadState.dirY = 0;
+      gamepadState.attack = false;
+      gamepadState.gather = false;
+      gamepadState.interact = false;
+      return;
+    }
+    updateGamepadLabels(pad);
+    gamepadState.connected = true;
+    let axisX = pad.axes[0] ?? 0;
+    let axisY = pad.axes[1] ?? 0;
+    axisX = applyGamepadDeadzone(axisX, GAMEPAD_DEADZONE);
+    axisY = applyGamepadDeadzone(axisY, GAMEPAD_DEADZONE);
+    const dpadLeft = pad.buttons[14]?.pressed;
+    const dpadRight = pad.buttons[15]?.pressed;
+    const dpadUp = pad.buttons[12]?.pressed;
+    const dpadDown = pad.buttons[13]?.pressed;
+    const dpadX = (dpadRight ? 1 : 0) - (dpadLeft ? 1 : 0);
+    const dpadY = (dpadDown ? 1 : 0) - (dpadUp ? 1 : 0);
+    if (dpadX || dpadY) {
+      axisX = dpadX;
+      axisY = dpadY;
+    }
+    gamepadState.dirX = axisX;
+    gamepadState.dirY = axisY;
+    gamepadState.attack = pad.buttons[0]?.pressed || false;
+    gamepadState.gather = pad.buttons[2]?.pressed || false;
+    gamepadState.interact = pad.buttons[3]?.pressed || false;
+    gamepadState.active =
+      Math.hypot(axisX, axisY) > 0 || gamepadState.attack || gamepadState.gather || gamepadState.interact;
+    if (gamepadState.active && !gamepadState.wasActive) {
+      setInputMethod('gamepad');
+    }
+    gamepadState.wasActive = gamepadState.active;
+  }
 
   function setStatusText(text) {
     if (!statusTextEl) {
@@ -1248,8 +1365,41 @@
     const action = button.dataset.action;
     if (action) {
       actionButtonsByAction.set(action, button);
+      const shortcutEl = button.querySelector('.action-shortcut');
+      if (shortcutEl) {
+        actionShortcutEls.set(action, shortcutEl);
+        actionShortcutDefaults[action] = shortcutEl.textContent.trim();
+      }
     }
   });
+
+  function updateControlHints(mode) {
+    const useGamepad = mode === 'gamepad';
+    actionShortcutEls.forEach((shortcutEl, action) => {
+      const label = useGamepad
+        ? (gamepadActionLabels[action] || '')
+        : (actionShortcutDefaults[action] || keyboardActionFallbacks[action] || '');
+      if (label && shortcutEl.textContent !== label) {
+        shortcutEl.textContent = label;
+      }
+    });
+    if (chatHintEl) {
+      const hint = useGamepad ? gamepadChatHint : keyboardChatHint;
+      if (chatHintEl.textContent !== hint) {
+        chatHintEl.textContent = hint;
+      }
+    }
+  }
+
+  function setInputMethod(mode) {
+    if (inputMethodState.mode === mode) return;
+    inputMethodState.mode = mode;
+    updateControlHints(mode);
+    document.body.classList.toggle('gamepad-active', mode === 'gamepad');
+  }
+
+  updateControlHints(inputMethodState.mode);
+  document.body.classList.toggle('gamepad-active', inputMethodState.mode === 'gamepad');
 
   function setActionState(action, isActive) {
     if (!(action in touchState)) return;
@@ -2682,6 +2832,19 @@
     helpEl.textContent = t('helpTouch');
   }
 
+  window.addEventListener('gamepadconnected', (event) => {
+    gamepadState.index = event.gamepad.index;
+    readGamepadState();
+  });
+
+  window.addEventListener('gamepaddisconnected', (event) => {
+    if (gamepadState.index === event.gamepad.index) {
+      gamepadState.index = null;
+      readGamepadState();
+      setInputMethod('keyboard');
+    }
+  });
+
   if (fullscreenButton) {
     updateFullscreenButton();
     fullscreenButton.addEventListener('click', async () => {
@@ -2748,6 +2911,9 @@
   if (app.canvas) {
     app.canvas.addEventListener('pointerdown', (event) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (event.pointerType === 'mouse') {
+        setInputMethod('keyboard');
+      }
       if (isTextInputFocused()) return;
       if (handleBuildClick(event)) {
         event.preventDefault();
@@ -2804,6 +2970,7 @@
   }
 
   window.addEventListener('keydown', (event) => {
+    setInputMethod('keyboard');
     if (isTextInputFocused()) return;
     keys.add(event.code);
     const arrowKey = normalizeArrowKey(event);
@@ -2831,6 +2998,12 @@
     const arrowKey = normalizeArrowKey(event);
     if (arrowKey) {
       keys.delete(arrowKey);
+    }
+  });
+
+  window.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse') {
+      setInputMethod('keyboard');
     }
   });
 
@@ -2896,28 +3069,34 @@
 
   setInterval(() => {
     if (!wsOpen) return;
+    readGamepadState();
     const inputLocked = isTextInputFocused();
     const usingTouch = touchState.active;
     const usingPointerMove = pointerMoveState.active;
+    const usingGamepad = gamepadState.connected && gamepadState.active;
     const dirX = inputLocked
       ? 0
       : usingTouch
         ? touchState.dirX
         : usingPointerMove
           ? pointerMoveState.dirX
-          : ((keys.has('KeyD') || keys.has('ArrowRight')) ? 1 : 0)
-            - ((keys.has('KeyA') || keys.has('ArrowLeft')) ? 1 : 0);
+          : usingGamepad
+            ? gamepadState.dirX
+            : ((keys.has('KeyD') || keys.has('ArrowRight')) ? 1 : 0)
+              - ((keys.has('KeyA') || keys.has('ArrowLeft')) ? 1 : 0);
     const dirY = inputLocked
       ? 0
       : usingTouch
         ? touchState.dirY
         : usingPointerMove
           ? pointerMoveState.dirY
-          : ((keys.has('KeyS') || keys.has('ArrowDown')) ? 1 : 0)
-            - ((keys.has('KeyW') || keys.has('ArrowUp')) ? 1 : 0);
-    const attack = !inputLocked && (keys.has('Space') || touchState.attack || touchState.attackPulse);
-    const gather = !inputLocked && (keys.has('KeyF') || touchState.gather || touchState.gatherPulse);
-    const interact = !inputLocked && (keys.has('KeyE') || touchState.interact || touchState.interactPulse);
+          : usingGamepad
+            ? gamepadState.dirY
+            : ((keys.has('KeyS') || keys.has('ArrowDown')) ? 1 : 0)
+              - ((keys.has('KeyW') || keys.has('ArrowUp')) ? 1 : 0);
+    const attack = !inputLocked && (keys.has('Space') || touchState.attack || touchState.attackPulse || gamepadState.attack);
+    const gather = !inputLocked && (keys.has('KeyF') || touchState.gather || touchState.gatherPulse || gamepadState.gather);
+    const interact = !inputLocked && (keys.has('KeyE') || touchState.interact || touchState.interactPulse || gamepadState.interact);
     const seq = inputSeq + 1;
     inputSeq = seq;
     lastInputDir = { x: dirX, y: dirY };

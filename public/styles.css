@@ -27,6 +27,10 @@ canvas {
   display: block;
 }
 
+body.gamepad-active {
+  cursor: none;
+}
+
 #hud {
   position: fixed;
   inset: 0;
